@@ -7,6 +7,7 @@ import re
 import secrets
 from logging.handlers import RotatingFileHandler
 from urllib.parse import urlencode, quote
+from yarl import URL
 from typing import Optional
 
 import aiohttp
@@ -392,9 +393,27 @@ class SeerrClient:
                 f"{url}?{encoded_query}"
             )
 
+        # IMPORTANT:
+        #
+        # The query string above is intentionally encoded
+        # with urllib.parse.quote instead of quote_plus.
+        #
+        # yarl/aiohttp normally canonicalizes URLs and can
+        # turn encoded reserved characters such as %27
+        # back into literal apostrophes before transmission.
+        #
+        # Seerr's query validator rejects those literals.
+        #
+        # encoded=True means:
+        # "this URL is already exactly how I want it sent."
+        request_url = URL(
+            url,
+            encoded=True
+        )
+
         async with self.session.request(
             method,
-            url,
+            request_url,
             **kwargs
         ) as response:
 
@@ -2114,21 +2133,37 @@ async def on_ready():
 
 HELP_FALLBACKS = {
     "help": (
-        "Show MediaBot commands or detailed "
-        "help for one command."
+        "Show current MediaBot commands or detailed "
+        "help for a specific command."
     ),
     "ping": (
-        "Check whether MediaBot is online."
+        "Check whether MediaBot is alive and measure "
+        "Discord latency."
     ),
     "whoami": (
-        "Show your Discord → Seerr account link."
+        "Show your linked Discord and Seerr identity."
     ),
     "request": (
-        "Search for a movie or TV show and "
-        "request it through Seerr."
+        "Search for a movie or TV show and request it "
+        "through Seerr."
     ),
     "admin": (
         "Administrative MediaBot commands."
+    ),
+    "health": (
+        "Check Discord and Seerr connectivity."
+    ),
+    "users": (
+        "List Seerr users available for Discord linking."
+    ),
+    "link": (
+        "Link a Discord member to a Seerr account."
+    ),
+    "logs": (
+        "Show recent MediaBot application logs."
+    ),
+    "errors": (
+        "Show recent warnings, errors, and error IDs."
     ),
 }
 
@@ -2386,6 +2421,12 @@ async def request(
             )
 
         except SeerrError as exc:
+            logger.warning(
+                "SEERR SEARCH FAILED | query=%r | error=%s",
+                query,
+                exc
+            )
+
             await ctx.reply(
                 (
                     "Seerr search failed:\n"
@@ -2426,7 +2467,11 @@ async def request(
 
 @bot.group(
     name="admin",
-    invoke_without_command=True
+    invoke_without_command=True,
+    help=(
+        "Administrative MediaBot commands for health, "
+        "user linking, logs, and diagnostics."
+    )
 )
 @commands.has_guild_permissions(
     administrator=True
@@ -2435,9 +2480,13 @@ async def admin(ctx):
     await ctx.reply(
         (
             "**MediaBot admin commands**\n"
-            "`$admin link @user SeerrUsername`\n"
-            "`$admin users`\n"
-            "`$admin health`"
+            "`$admin health` - service connectivity\n"
+            "`$admin users` - list Seerr users\n"
+            "`$admin link @user SeerrUsername` - link accounts\n"
+            "`$admin logs [lines]` - recent bot logs\n"
+            "`$admin errors [lines]` - warnings/errors\n"
+            "\n"
+            "Use `$help admin` for generated command help."
         )
     )
 
@@ -2729,6 +2778,23 @@ async def admin_link(
 # ADMIN LOGGING
 # ============================================================
 
+def count_log_lines():
+    try:
+        with open(
+            LOG_PATH,
+            "r",
+            encoding="utf-8",
+            errors="replace"
+        ) as handle:
+            return sum(
+                1
+                for _ in handle
+            )
+
+    except FileNotFoundError:
+        return 0
+
+
 def read_log_tail(
     line_count: int = 80
 ):
@@ -2818,13 +2884,28 @@ async def admin_logs(
         )
     )
 
+    available = count_log_lines()
+
     output = read_log_tail(
         lines
     )
 
+    shown = min(
+        lines,
+        available
+    )
+
+    header = (
+        "MediaBot Logs\n"
+        f"Requested: {lines} line(s)\n"
+        f"Showing:   {shown} of {available} available line(s)\n"
+        + ("-" * 60)
+        + "\n"
+    )
+
     await send_log_output(
         ctx,
-        output,
+        header + output,
         filename="mediabot-logs.txt"
     )
 
@@ -2869,13 +2950,28 @@ async def admin_errors(
         ):
             interesting.append(line)
 
+    selected = interesting[
+        -lines:
+    ]
+
     output = "\n".join(
-        interesting[-lines:]
+        selected
     )
+
+    header = (
+        "MediaBot Warnings / Errors\n"
+        f"Requested: {lines} entrie(s)\n"
+        f"Showing:   {len(selected)} matching entrie(s)\n"
+        + ("-" * 60)
+        + "\n"
+    )
+
+    if not output.strip():
+        output = "(no matching log entries)"
 
     await send_log_output(
         ctx,
-        output,
+        header + output,
         filename="mediabot-errors.txt"
     )
 
