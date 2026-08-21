@@ -11,5 +11,3 @@ __pycache__/
 .DS_Store
 *.swp
 *.swo
-
-compose.override.yaml
