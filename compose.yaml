@@ -1,0 +1,14 @@
+services:
+  mediabot:
+    build: .
+    container_name: mediabot
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    volumes:
+      - ./data:/app/data
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
