@@ -1,85 +1,92 @@
-# Dogginator MediaBot
+# Dogginator MediaBot Architecture
 
 ## Rule
 
-Commands do not directly own service-specific HTTP logic.
+Discord command handlers must not become service implementations.
 
-Discord Command
-    |
-    v
-Service Layer
-    |
-    +-- Seerr Provider
-    +-- Jellyfin Provider
-    +-- SoulSync Provider
-    +-- Future Providers
+## Authority
 
-## Target Layout
+### Seerr
 
-mediabot/
-├── bot.py
-├── core/
-│   ├── config.py
-│   ├── database.py
-│   └── logging.py
-├── providers/
-│   ├── base.py
-│   ├── seerr.py
-│   ├── jellyfin.py
-│   └── soulsync.py
-├── services/
-│   ├── requests.py
-│   ├── discovery.py
-│   ├── recommendations.py
-│   ├── library.py
-│   ├── notifications.py
-│   └── events.py
-├── commands/
-│   ├── help.py
-│   ├── request.py
-│   ├── status.py
-│   ├── random.py
-│   ├── discover.py
-│   ├── recommend.py
-│   ├── music.py
-│   ├── report.py
-│   ├── events.py
-│   ├── spooktober.py
-│   └── admin.py
-└── ui/
-    ├── media.py
-    ├── search.py
-    ├── pagination.py
-    └── confirmation.py
+Movie / TV:
 
-## Authorities
+- discovery
+- search
+- request creation
+- request state
+- metadata
 
-Seerr:
-- movie/TV search
-- requests
-- request status
-- TMDB discovery metadata
+### Jellyfin
 
-Jellyfin:
-- actual library contents
-- watch state
-- play history
-- media item IDs
-- Watch links
-- recent additions
+Actual library:
 
-SoulSync:
+- available media
+- recently added media
+- item IDs
+- provider IDs
+- playback links
+- future watch state/history
+
+### SoulSync
+
+Music:
+
 - music discovery
-- music acquisition
-- music recommendations
-- music automation
+- acquisition
+- recommendation workflows
 
-MediaBot:
+### MediaBot
+
+Orchestration:
+
 - Discord UX
-- orchestration
 - account mappings
-- event system
-- user-facing state
-- cross-provider reconciliation
+- persistent request cards
+- cross-provider matching
+- event engine
+- diagnostics
 
-MediaBot must NOT become Radarr, Sonarr, Seerr, Jellyfin or SoulSync.
+## Current flow
+
+Discord
+   |
+   | $request
+   v
+MediaBot
+   |
+   v
+Seerr
+   |
+   v
+Radarr / Sonarr
+   |
+   v
+Downloader
+   |
+   v
+Jellyfin
+   |
+   | availability poll
+   v
+MediaBot
+   |
+   v
+Original Discord message becomes:
+WATCH IN JELLYFIN
+
+## Future
+
+MediaBot
+├── Video
+│   ├── Seerr
+│   └── Jellyfin
+│
+├── Music
+│   └── SoulSync
+│
+├── Discovery
+│   ├── Random
+│   └── Recommendations
+│
+└── Events
+    └── Spooktober

@@ -12,7 +12,20 @@ from typing import Optional
 
 import aiohttp
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
+
+from mediabot.core.database import (
+    init_tracking_db,
+    track_request,
+    pending_requests,
+    mark_available,
+    tracking_stats,
+)
+
+from mediabot.providers.jellyfin import (
+    JellyfinProvider,
+    JellyfinError,
+)
 
 
 # ============================================================
@@ -507,6 +520,7 @@ class SeerrClient:
 
 
 seerr = SeerrClient()
+jellyfin = JellyfinProvider()
 
 
 # ============================================================
@@ -1246,6 +1260,63 @@ class ConfirmRequestView(
                 "available."
             )
         )
+
+        # ----------------------------------------------------
+        # PERSIST REQUEST -> DISCORD MESSAGE RELATIONSHIP
+        # ----------------------------------------------------
+
+        try:
+
+            if str(request_id).isdigit():
+
+                track_request(
+                    seerr_request_id=(
+                        int(request_id)
+                    ),
+                    media_type=media_type,
+                    tmdb_id=media_id,
+                    title=title,
+                    year=year,
+                    requester_discord_id=(
+                        interaction.user.id
+                    ),
+                    discord_guild_id=(
+                        interaction.guild_id
+                    ),
+                    discord_channel_id=(
+                        self.origin_message.channel.id
+                    ),
+                    discord_message_id=(
+                        self.origin_message.id
+                    ),
+                    request_status=(
+                        status_text
+                    )
+                )
+
+                logger.info(
+                    (
+                        "REQUEST TRACKED | "
+                        "request_id=%s | "
+                        "channel=%s | "
+                        "message=%s"
+                    ),
+                    request_id,
+                    self.origin_message.channel.id,
+                    self.origin_message.id
+                )
+
+        except Exception as exc:
+
+            log_exception(
+                (
+                    "Request succeeded but "
+                    "persistent request tracking failed "
+                    f"request_id={request_id}"
+                ),
+                exc
+            )
+
 
         # ----------------------------------------------------
         # UPDATE PUBLIC REQUEST CARD
@@ -2100,12 +2171,318 @@ class SearchResultsView(
                 pass
 
 
+
+# ============================================================
+# JELLYFIN UI
+# ============================================================
+
+class JellyfinAvailableView(
+    discord.ui.View
+):
+    def __init__(
+        self,
+        *,
+        item,
+        jellyfin_item_id
+    ):
+        super().__init__(
+            timeout=None
+        )
+
+        self.add_item(
+            discord.ui.Button(
+                label="▶ Watch in Jellyfin",
+                style=discord.ButtonStyle.link,
+                url=jellyfin.watch_url(
+                    jellyfin_item_id
+                )
+            )
+        )
+
+        public_url = (
+            SEERR_PUBLIC_URL
+            or ""
+        )
+
+        if (
+            public_url
+            and "host.docker.internal"
+            not in public_url
+        ):
+
+            self.add_item(
+                discord.ui.Button(
+                    label="Open in Seerr",
+                    style=discord.ButtonStyle.link,
+                    url=seerr_media_url(
+                        item
+                    )
+                )
+            )
+
+        self.add_item(
+            discord.ui.Button(
+                label="TMDB",
+                style=discord.ButtonStyle.link,
+                url=tmdb_media_url(
+                    item
+                )
+            )
+        )
+
+
+def jellyfin_item_year(
+    item
+):
+    value = item.get(
+        "ProductionYear"
+    )
+
+    return str(
+        value
+        or "????"
+    )
+
+
+def jellyfin_item_summary(
+    item
+):
+    title = item.get(
+        "Name",
+        "Unknown"
+    )
+
+    year = jellyfin_item_year(
+        item
+    )
+
+    kind = item.get(
+        "Type",
+        "Unknown"
+    )
+
+    genres = (
+        item.get("Genres")
+        or []
+    )
+
+    rating = item.get(
+        "CommunityRating"
+    )
+
+    parts = [
+        f"**{title} ({year})**",
+        kind,
+    ]
+
+    if rating:
+
+        try:
+            parts.append(
+                f"{float(rating):.1f}/10"
+            )
+
+        except Exception:
+            pass
+
+    if genres:
+        parts.append(
+            ", ".join(
+                genres[:4]
+            )
+        )
+
+    return " • ".join(parts)
+
+
+
+# ============================================================
+# JELLYFIN REQUEST AVAILABILITY WATCHER
+# ============================================================
+
+JELLYFIN_POLL_SECONDS = int(
+    os.environ.get(
+        "JELLYFIN_POLL_SECONDS",
+        "60"
+    )
+)
+
+
+@tasks.loop(
+    seconds=JELLYFIN_POLL_SECONDS
+)
+async def jellyfin_availability_watcher():
+
+    if not jellyfin.enabled:
+        return
+
+    records = pending_requests(
+        limit=100
+    )
+
+    for record in records:
+
+        try:
+
+            jf_item = await jellyfin.find_by_tmdb(
+                tmdb_id=record["tmdb_id"],
+                title=record["title"],
+                media_type=record["media_type"]
+            )
+
+            if not jf_item:
+                continue
+
+            channel = bot.get_channel(
+                int(
+                    record[
+                        "discord_channel_id"
+                    ]
+                )
+            )
+
+            if channel is None:
+
+                channel = (
+                    await bot.fetch_channel(
+                        int(
+                            record[
+                                "discord_channel_id"
+                            ]
+                        )
+                    )
+                )
+
+            message = await channel.fetch_message(
+                int(
+                    record[
+                        "discord_message_id"
+                    ]
+                )
+            )
+
+            media_type = record[
+                "media_type"
+            ]
+
+            tmdb_id = int(
+                record["tmdb_id"]
+            )
+
+            try:
+
+                details = await seerr.request(
+                    "GET",
+                    f"/{media_type}/{tmdb_id}"
+                )
+
+            except Exception:
+
+                details = {
+                    "id": tmdb_id,
+                    "mediaType":
+                        media_type,
+
+                    "title":
+                        record["title"],
+
+                    "name":
+                        record["title"],
+
+                    "overview":
+                        "Available in Jellyfin.",
+                }
+
+            details[
+                "mediaType"
+            ] = media_type
+
+            item = dict(details)
+
+            final_embed = build_media_embed(
+                item,
+                details,
+                heading="Availability",
+                state_text=(
+                    "**Available in Jellyfin**"
+                ),
+                color=discord.Color.green()
+            )
+
+            final_embed.set_footer(
+                text=(
+                    f"Originally requested as "
+                    f"Seerr request "
+                    f"#{record['seerr_request_id']}"
+                )
+            )
+
+            await message.edit(
+                embed=final_embed,
+                view=JellyfinAvailableView(
+                    item=item,
+                    jellyfin_item_id=(
+                        jf_item["Id"]
+                    )
+                )
+            )
+
+            mark_available(
+                seerr_request_id=(
+                    record[
+                        "seerr_request_id"
+                    ]
+                ),
+                jellyfin_item_id=(
+                    jf_item["Id"]
+                )
+            )
+
+            logger.info(
+                (
+                    "JELLYFIN AVAILABLE | "
+                    "request_id=%s | "
+                    "title=%s | "
+                    "jellyfin_item=%s"
+                ),
+                record[
+                    "seerr_request_id"
+                ],
+                record["title"],
+                jf_item["Id"]
+            )
+
+        except Exception as exc:
+
+            log_exception(
+                (
+                    "Jellyfin availability "
+                    f"reconciliation failed "
+                    f"request_id="
+                    f"{record['seerr_request_id']}"
+                ),
+                exc
+            )
+
+
+@jellyfin_availability_watcher.before_loop
+async def before_jellyfin_watcher():
+
+    await bot.wait_until_ready()
+
+
 # ============================================================
 # EVENTS
 # ============================================================
 
 @bot.event
 async def on_ready():
+
+    if (
+        jellyfin.enabled
+        and not jellyfin_availability_watcher.is_running()
+    ):
+        jellyfin_availability_watcher.start()
     logger.info(
         "MediaBot online | discord_user=%s | discord_id=%s | prefix=%s | seerr=%s",
         bot.user,
@@ -2171,8 +2548,8 @@ HELP_FALLBACKS = {
 @bot.command(
     name="help",
     help=(
-        "Show all MediaBot commands or "
-        "help for one command."
+        "Show every currently registered "
+        "MediaBot command."
     )
 )
 async def mediabot_help(
@@ -2183,20 +2560,29 @@ async def mediabot_help(
     prefix = ctx.clean_prefix
 
     if topic:
+
         command = bot.get_command(
             topic.strip()
         )
 
         if command is None:
+
             await ctx.reply(
                 (
-                    f"No command named "
-                    f"`{topic}` exists.\n"
-                    f"Run `{prefix}help` "
-                    "for the current list."
+                    f"No command named `{topic}` exists.\n"
+                    f"Run `{prefix}help` for the live list."
                 )
             )
+
             return
+
+        description = (
+            command.help
+            or HELP_FALLBACKS.get(
+                command.name
+            )
+            or "No description yet."
+        )
 
         usage = (
             f"{prefix}"
@@ -2207,14 +2593,6 @@ async def mediabot_help(
             usage += (
                 f" {command.signature}"
             )
-
-        description = (
-            command.help
-            or HELP_FALLBACKS.get(
-                command.name
-            )
-            or "No description yet."
-        )
 
         embed = discord.Embed(
             title=(
@@ -2236,43 +2614,50 @@ async def mediabot_help(
             command,
             commands.Group
         ):
+
             children = sorted(
-                command.commands,
-                key=lambda cmd: cmd.name
+                command.walk_commands(),
+                key=lambda c:
+                    c.qualified_name
             )
 
-            if children:
-                lines = []
+            blocks = []
 
-                for child in children:
-                    child_usage = (
-                        f"{prefix}"
-                        f"{child.qualified_name}"
+            for child in children:
+
+                child_usage = (
+                    f"{prefix}"
+                    f"{child.qualified_name}"
+                )
+
+                if child.signature:
+
+                    child_usage += (
+                        f" {child.signature}"
                     )
 
-                    if child.signature:
-                        child_usage += (
-                            f" {child.signature}"
-                        )
-
-                    description = (
-                        child.help
-                        or HELP_FALLBACKS.get(
-                            child.name
-                        )
-                        or "No description yet."
+                child_help = (
+                    child.help
+                    or HELP_FALLBACKS.get(
+                        child.name
                     )
+                    or "No description yet."
+                )
 
-                    lines.append(
+                blocks.append(
+                    (
                         f"`{child_usage}`\n"
-                        f"{description}"
+                        f"{child_help}"
                     )
+                )
+
+            if blocks:
 
                 embed.add_field(
                     name="Subcommands",
-                    value="\n\n".join(
-                        lines
-                    ),
+                    value=(
+                        "\n\n".join(blocks)
+                    )[:1024],
                     inline=False
                 )
 
@@ -2285,29 +2670,25 @@ async def mediabot_help(
     embed = discord.Embed(
         title="Dogginator Media Help",
         description=(
-            "Commands are generated from "
-            "MediaBot's currently registered "
-            "command list."
+            "This list is generated from "
+            "MediaBot's live command registry. "
+            "If a command exists, it appears here."
         ),
         color=discord.Color.blurple()
     )
 
-    command_lines = []
-
-    for command in sorted(
+    top_level = sorted(
         bot.commands,
-        key=lambda cmd: cmd.name
-    ):
+        key=lambda c: c.name
+    )
+
+    normal_lines = []
+    admin_lines = []
+
+    for command in top_level:
+
         if command.hidden:
             continue
-
-        description = (
-            command.help
-            or HELP_FALLBACKS.get(
-                command.name
-            )
-            or "No description yet."
-        )
 
         usage = (
             f"{prefix}"
@@ -2319,30 +2700,92 @@ async def mediabot_help(
                 f" {command.signature}"
             )
 
-        command_lines.append(
-            f"`{usage}`\n"
-            f"{description}"
+        description = (
+            command.help
+            or HELP_FALLBACKS.get(
+                command.name
+            )
+            or "No description yet."
         )
 
-    embed.add_field(
-        name="Commands",
-        value="\n\n".join(
-            command_lines
-        ),
-        inline=False
-    )
+        normal_lines.append(
+            (
+                f"`{usage}`\n"
+                f"{description}"
+            )
+        )
+
+        if isinstance(
+            command,
+            commands.Group
+        ):
+
+            for child in sorted(
+                command.walk_commands(),
+                key=lambda c:
+                    c.qualified_name
+            ):
+
+                child_usage = (
+                    f"{prefix}"
+                    f"{child.qualified_name}"
+                )
+
+                if child.signature:
+
+                    child_usage += (
+                        f" {child.signature}"
+                    )
+
+                child_help = (
+                    child.help
+                    or HELP_FALLBACKS.get(
+                        child.name
+                    )
+                    or "No description yet."
+                )
+
+                admin_lines.append(
+                    (
+                        f"`{child_usage}`\n"
+                        f"{child_help}"
+                    )
+                )
+
+    if normal_lines:
+
+        embed.add_field(
+            name="Commands",
+            value=(
+                "\n\n".join(
+                    normal_lines
+                )
+            )[:1024],
+            inline=False
+        )
+
+    if admin_lines:
+
+        embed.add_field(
+            name="Administrative Commands",
+            value=(
+                "\n\n".join(
+                    admin_lines
+                )
+            )[:1024],
+            inline=False
+        )
 
     embed.set_footer(
         text=(
             f"Use {prefix}help <command> "
-            "for details."
+            "for command-specific details."
         )
     )
 
     await ctx.reply(
         embed=embed
     )
-
 
 
 @bot.command()
@@ -2459,6 +2902,306 @@ async def request(
     )
 
     view.message = message
+
+
+
+# ============================================================
+# JELLYFIN COMMANDS
+# ============================================================
+
+@bot.command(
+    help=(
+        "Check whether a movie or show is "
+        "already available in Jellyfin or "
+        "known to Seerr."
+    )
+)
+async def status(
+    ctx,
+    *,
+    query: str = ""
+):
+    query = " ".join(
+        query.split()
+    )
+
+    if not query:
+
+        await ctx.reply(
+            (
+                "Usage: `$status <movie or TV show>`\n"
+                "Example: `$status Interstellar`"
+            )
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # FIRST: ACTUAL JELLYFIN LIBRARY
+    # --------------------------------------------------------
+
+    if jellyfin.enabled:
+
+        try:
+
+            results = await jellyfin.search(
+                query,
+                limit=5
+            )
+
+        except Exception as exc:
+
+            error_id = log_exception(
+                (
+                    "Jellyfin status search failed "
+                    f"query={query!r}"
+                ),
+                exc
+            )
+
+            await ctx.reply(
+                (
+                    "Jellyfin lookup failed.\n"
+                    f"Error ID: `{error_id}`"
+                )
+            )
+
+            return
+
+        if results:
+
+            item = results[0]
+
+            embed = discord.Embed(
+                title=(
+                    f"{item.get('Name', 'Unknown')} "
+                    f"({jellyfin_item_year(item)})"
+                ),
+                description=(
+                    item.get("Overview")
+                    or "No overview available."
+                ),
+                color=discord.Color.green()
+            )
+
+            embed.add_field(
+                name="Status",
+                value="**Available in Jellyfin**",
+                inline=False
+            )
+
+            genres = (
+                item.get("Genres")
+                or []
+            )
+
+            if genres:
+
+                embed.add_field(
+                    name="Genres",
+                    value=", ".join(
+                        genres[:5]
+                    ),
+                    inline=False
+                )
+
+            rating = item.get(
+                "CommunityRating"
+            )
+
+            if rating:
+
+                embed.add_field(
+                    name="Rating",
+                    value=(
+                        f"{float(rating):.1f}/10"
+                    ),
+                    inline=True
+                )
+
+            view = discord.ui.View(
+                timeout=None
+            )
+
+            view.add_item(
+                discord.ui.Button(
+                    label="▶ Watch in Jellyfin",
+                    style=discord.ButtonStyle.link,
+                    url=jellyfin.watch_url(
+                        item["Id"]
+                    )
+                )
+            )
+
+            await ctx.reply(
+                embed=embed,
+                view=view
+            )
+
+            return
+
+    # --------------------------------------------------------
+    # SECOND: SEERR
+    # --------------------------------------------------------
+
+    try:
+
+        results = await seerr.search(
+            query
+        )
+
+    except Exception as exc:
+
+        error_id = log_exception(
+            (
+                "Seerr status search failed "
+                f"query={query!r}"
+            ),
+            exc
+        )
+
+        await ctx.reply(
+            (
+                "Seerr lookup failed.\n"
+                f"Error ID: `{error_id}`"
+            )
+        )
+
+        return
+
+    if not results:
+
+        await ctx.reply(
+            (
+                f'Nothing found for **"{query}"**.'
+            )
+        )
+
+        return
+
+    item = results[0]
+
+    await ctx.reply(
+        (
+            f"**{media_title(item)} "
+            f"({media_year(item)})**\n"
+            f"Seerr status: "
+            f"**{media_status(item)}**"
+        )
+    )
+
+
+@bot.command(
+    name="new",
+    help=(
+        "Show recently added movies and "
+        "shows from Jellyfin."
+    )
+)
+async def newly_added(
+    ctx,
+    limit: int = 10
+):
+    limit = max(
+        1,
+        min(
+            int(limit),
+            15
+        )
+    )
+
+    if not jellyfin.enabled:
+
+        await ctx.reply(
+            (
+                "Jellyfin integration is "
+                "not configured."
+            )
+        )
+
+        return
+
+    try:
+
+        items = await jellyfin.latest(
+            limit=limit
+        )
+
+    except Exception as exc:
+
+        error_id = log_exception(
+            "Jellyfin $new failed",
+            exc
+        )
+
+        await ctx.reply(
+            (
+                "Couldn't load recent media.\n"
+                f"Error ID: `{error_id}`"
+            )
+        )
+
+        return
+
+    if not items:
+
+        await ctx.reply(
+            "Jellyfin returned no recent media."
+        )
+
+        return
+
+    lines = []
+
+    for index, item in enumerate(
+        items,
+        start=1
+    ):
+
+        title = item.get(
+            "Name",
+            "Unknown"
+        )
+
+        year = jellyfin_item_year(
+            item
+        )
+
+        kind = item.get(
+            "Type",
+            "Unknown"
+        )
+
+        url = jellyfin.watch_url(
+            item["Id"]
+        )
+
+        lines.append(
+            (
+                f"**{index}. "
+                f"[{title} ({year})]({url})**\n"
+                f"{kind}"
+            )
+        )
+
+    embed = discord.Embed(
+        title="Recently Added to Jellyfin",
+        description="\n\n".join(
+            lines
+        ),
+        color=discord.Color.green()
+    )
+
+    embed.set_footer(
+        text=(
+            f"Showing {len(items)} "
+            "most recently created library items"
+        )
+    )
+
+    await ctx.reply(
+        embed=embed
+    )
 
 
 # ============================================================
@@ -2774,6 +3517,93 @@ async def admin_link(
 
 
 
+
+@admin.command(
+    name="integrations",
+    help=(
+        "Show MediaBot integration and "
+        "request-tracking health."
+    )
+)
+@commands.has_guild_permissions(
+    administrator=True
+)
+async def admin_integrations(
+    ctx
+):
+    lines = []
+
+    try:
+
+        await seerr.health()
+
+        lines.append(
+            "Seerr: **OK**"
+        )
+
+    except Exception as exc:
+
+        lines.append(
+            f"Seerr: **FAILED** (`{type(exc).__name__}`)"
+        )
+
+    if jellyfin.enabled:
+
+        try:
+
+            info = await jellyfin.health()
+
+            version = (
+                info.get("Version")
+                or "unknown"
+            )
+
+            lines.append(
+                f"Jellyfin: **OK** "
+                f"(v{version})"
+            )
+
+        except Exception as exc:
+
+            lines.append(
+                f"Jellyfin: **FAILED** "
+                f"(`{type(exc).__name__}`)"
+            )
+
+    else:
+
+        lines.append(
+            "Jellyfin: **NOT CONFIGURED**"
+        )
+
+    stats = tracking_stats()
+
+    lines.append(
+        (
+            "Tracked requests: "
+            f"**{stats['total']}**"
+        )
+    )
+
+    lines.append(
+        (
+            "Awaiting Jellyfin: "
+            f"**{stats['pending']}**"
+        )
+    )
+
+    lines.append(
+        (
+            "Matched to Jellyfin: "
+            f"**{stats['available']}**"
+        )
+    )
+
+    await ctx.reply(
+        "\n".join(lines)
+    )
+
+
 # ============================================================
 # ADMIN LOGGING
 # ============================================================
@@ -3074,8 +3904,10 @@ async def on_command_error(
 
 async def main():
     init_db()
+    init_tracking_db()
 
     await seerr.start()
+    await jellyfin.start()
 
     try:
         await seerr.health()
@@ -3093,6 +3925,7 @@ async def main():
         await bot.start(DISCORD_TOKEN)
 
     finally:
+        await jellyfin.close()
         await seerr.close()
 
 
