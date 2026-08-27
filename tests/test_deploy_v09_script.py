@@ -78,6 +78,12 @@ class DeployV09ContractTests(unittest.TestCase):
         drill_index = self.source.index("Intentional rollback drill trigger")
         self.assertLess(health_index, drill_index)
 
+    def test_packaged_test_gate_mounts_every_inspected_path(self):
+        self.assertIn('-v "$stage/scripts:/scripts:ro"', self.source)
+        self.assertIn('-v "$stage/tests:/tests:ro"', self.source)
+        self.assertIn("-e DISCORD_TOKEN=test-token", self.source)
+        self.assertIn("-e SEERR_API_KEY=test-key", self.source)
+
     @unittest.skipUnless(os.name != "nt" and shutil.which("sh"), "POSIX sh is unavailable")
     def test_posix_shell_syntax(self):
         result = subprocess.run(

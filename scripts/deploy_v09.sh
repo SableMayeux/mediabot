@@ -478,12 +478,13 @@ docker run --rm --network none --read-only --tmpfs /tmp:size=128m \
 
 docker run --rm --network none --read-only --tmpfs /tmp:size=256m \
     --user 1000:1000 \
-    -e DISCORD_TOKEN=deployment-stage-validation \
-    -e SEERR_API_KEY=deployment-stage-validation \
+    -e DISCORD_TOKEN=test-token \
+    -e SEERR_API_KEY=test-key \
     -e ALLOWED_GUILD_IDS=1 \
     -e DB_PATH=/tmp/mediabot-test.db \
     -e LOG_PATH=/tmp/mediabot-test.log \
     -e RUNTIME_HEALTH_PATH=/tmp/runtime-health.json \
+    -v "$stage/scripts:/scripts:ro" \
     -v "$stage/tests:/tests:ro" \
     --entrypoint python "$candidate_image" \
     -m unittest discover -s /tests -q
