@@ -187,8 +187,8 @@ To prove rollback before a release, run the same staged deployment with
 `MEDIABOT_ROLLBACK_DRILL=1`. The candidate must become healthy first; the
 deployer then deliberately fails and restores the verified pre-deploy runtime,
 database, environment, ownership, and container state. A drill exits non-zero
-by design and must end with `Rollback completed successfully.` before a real
-deployment is attempted.
+by design and must confirm that the original runtime, configuration, database,
+and metadata were restored before a real deployment is attempted.
 
 ## Security
 
