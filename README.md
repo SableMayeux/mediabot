@@ -168,6 +168,7 @@ The repository uses the standard library `unittest` runner:
 python -m pip check
 python -m compileall -q app.py mediabot scripts tests
 python -m unittest discover -s tests -q
+test -x scripts/deploy_v09.sh
 sh -n scripts/deploy_v09.sh
 ```
 
