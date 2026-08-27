@@ -1,0 +1,14 @@
+**/__pycache__/
+**/*.py[cod]
+tests/
+scripts/
+.git/
+.codex-backups/
+.pytest_cache/
+.env
+.env.*
+!.env.example
+data/
+*.pre-*
+*.tgz
+*.tar.gz
