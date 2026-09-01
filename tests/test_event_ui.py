@@ -101,7 +101,7 @@ class EventCommandSurfaceTests(EventAppTestCase):
             },
         )
         self.assertIsNone(self.app.bot.get_command("spooktober"))
-        self.assertEqual(self.app.BOT_VERSION, "0.9.0")
+        self.assertEqual(self.app.BOT_VERSION, "0.9.1")
 
     def test_admin_children_have_both_guild_and_administrator_checks(self):
         group = self.app.bot.get_command("event")

@@ -20,8 +20,8 @@ class DeployV09ContractTests(unittest.TestCase):
         self.assertTrue(SCRIPT.is_file())
 
     def test_release_and_stage_are_exact(self):
-        self.assertIn('release_version="0.9.0"', self.source)
-        self.assertIn('stage_namespace="/tmp/mediabot-v090-"', self.source)
+        self.assertIn('release_version="0.9.1"', self.source)
+        self.assertIn('stage_namespace="/tmp/mediabot-v091-"', self.source)
         self.assertNotIn("mediabot-v080-", self.source)
 
     def test_complete_runtime_manifest_is_backed_up_and_installed(self):
@@ -51,7 +51,7 @@ class DeployV09ContractTests(unittest.TestCase):
         self.assertIn("MEDIABOT_ALLOWED_GUILD_IDS", self.source)
         self.assertIn('"ALLOWED_GUILD_IDS=" + value', self.source)
         self.assertIn("os.chown(directory, 1000, 1000)", self.source)
-        self.assertIn(".mediabot-write-probe-v090", self.source)
+        self.assertIn(".mediabot-write-probe-v091", self.source)
         self.assertIn('connection.execute("BEGIN IMMEDIATE")', self.source)
 
     def test_release_gates_cover_runtime_and_container_hardening(self):

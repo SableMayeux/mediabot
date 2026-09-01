@@ -116,7 +116,7 @@ DB_PATH = os.environ.get(
 
 PREFIX = "$"
 
-BOT_VERSION = "0.9.0"
+BOT_VERSION = "0.9.1"
 
 
 def parse_allowed_guild_ids(value):
@@ -4709,6 +4709,11 @@ class ConfirmMusicRequestView(LoggedView):
                     "artist": music_artists(self.track),
                     "title": str(self.track.get("name") or ""),
                     "album": str(self.track.get("album") or "Singles"),
+                    "expected_duration_ms": self.track.get("duration_ms"),
+                    "external_id": str(self.track.get("id") or ""),
+                    "metadata_source": str(
+                        self.track.get("_metadata_source") or ""
+                    ),
                 },
             )
         except SoulSyncError as exc:
@@ -8079,7 +8084,13 @@ async def music_request(ctx, *, query: str = ""):
         await ctx.reply(f"SoulSync search failed. Error ID: `{error_id}`")
         return
 
-    tracks = result.get("tracks") or []
+    metadata_source = str(result.get("source") or "")
+    tracks = [
+        {**track, "_metadata_source": metadata_source}
+        if isinstance(track, dict)
+        else track
+        for track in (result.get("tracks") or [])
+    ]
     if not tracks:
         await ctx.reply(f'Nothing found for **"{query}"**.')
         return

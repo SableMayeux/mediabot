@@ -5,6 +5,22 @@ All notable changes to Dogginator MediaBot are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses semantic version numbers.
 
+## [0.9.1] - 2026-09-01
+
+### Changed
+
+- Added provider provenance, stable external IDs, and expected duration metadata
+  to exact-track requests sent from MediaBot to SoulSync.
+
+### Fixed
+
+- Stopped MediaBot's synchronous SoulSync request path from publishing audio
+  until the complete stream decodes and passes SoulSync's integrity checks.
+- Quarantined failed incoming files and invalid existing destinations instead
+  of marking preview-length or otherwise truncated audio as completed.
+- Published validated replacements atomically and exposed validation and
+  provenance details through SoulSync's request-status response.
+
 ## [0.9.0] - 2026-08-26
 
 ### Added

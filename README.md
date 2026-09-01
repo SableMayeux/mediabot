@@ -5,7 +5,7 @@ stack. It gives household users one small, consistent command surface while
 leaving media search, approval, acquisition, and playback with the services
 that already own those jobs.
 
-Current source version: **0.9.0**
+Current source version: **0.9.1**
 
 ## What it does
 
