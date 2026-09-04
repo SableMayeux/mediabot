@@ -5,6 +5,43 @@ All notable changes to Dogginator MediaBot are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses semantic version numbers.
 
+## [0.10.0] - 2026-09-04
+
+### Added
+
+- Added guild-scoped candidate-time voting with persistent availability,
+  per-reader Discord timestamps, date/time selectors, and an exact local-time
+  modal and command fallback.
+- Added restart-safe event dashboard controls for title voting, time voting,
+  proposing times, and scheduled-event management.
+- Added native Discord Scheduled Event synchronization for every future media
+  slot, with durable remote IDs and marker-based recovery after partial failure.
+- Added at-most-once 24-hour, 1-hour, and start-time reminders with an optional
+  configured role ping.
+- Added event history plus administrator reschedule, reopen, archive, and clear
+  operations.
+
+### Changed
+
+- Made a published event schedule mutable: administrators can move slots or
+  reopen the existing ballot without recreating its nominations and votes.
+- Advanced title votes and time availability through one event revision so a
+  schedule preview cannot publish stale results.
+- Extended the event reconciliation worker to retry native Discord publishing,
+  deliver due reminders, complete schedules after a configurable grace period,
+  and retire finished dashboard controls.
+- Upgraded the additive event schema to version 2 while retaining the original
+  event, nomination, vote, and slot records.
+
+### Fixed
+
+- Prevented an expired scheduled event from remaining the guild's current event
+  indefinitely.
+- Prevented restarts and late worker runs from sending duplicate or obsolete
+  reminder stages.
+- Kept cancelled, dismissed, timed-out, and successful event interactions on
+  the same cleanup and durable-receipt rules as the rest of MediaBot.
+
 ## [0.9.1] - 2026-09-01
 
 ### Changed

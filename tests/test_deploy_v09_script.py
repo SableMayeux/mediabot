@@ -6,22 +6,26 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "scripts" / "deploy_v09.sh"
+SCRIPT = ROOT / "scripts" / "deploy_v010.sh"
 
 
-class DeployV09ContractTests(unittest.TestCase):
+class DeployV010ContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.source = SCRIPT.read_text(encoding="utf-8")
+        cls.legacy_source = (ROOT / "scripts" / "deploy_v09.sh").read_text(
+            encoding="utf-8"
+        )
 
-    def test_old_deployer_is_retired(self):
+    def test_deployer_exists_and_ancient_deployers_are_retired(self):
         self.assertFalse((ROOT / "scripts" / "deploy_v06.sh").exists())
         self.assertFalse((ROOT / "scripts" / "deploy_v05.sh").exists())
         self.assertTrue(SCRIPT.is_file())
 
     def test_release_and_stage_are_exact(self):
-        self.assertIn('release_version="0.9.1"', self.source)
-        self.assertIn('stage_namespace="/tmp/mediabot-v091-"', self.source)
+        self.assertIn('release_version="0.10.0"', self.source)
+        self.assertIn('stage_namespace="/tmp/mediabot-v0100-"', self.source)
+        self.assertNotIn("mediabot-v091-", self.source)
         self.assertNotIn("mediabot-v080-", self.source)
 
     def test_complete_runtime_manifest_is_backed_up_and_installed(self):
@@ -51,8 +55,43 @@ class DeployV09ContractTests(unittest.TestCase):
         self.assertIn("MEDIABOT_ALLOWED_GUILD_IDS", self.source)
         self.assertIn('"ALLOWED_GUILD_IDS=" + value', self.source)
         self.assertIn("os.chown(directory, 1000, 1000)", self.source)
-        self.assertIn(".mediabot-write-probe-v091", self.source)
+        self.assertIn(".mediabot-write-probe-v0100", self.source)
         self.assertIn('connection.execute("BEGIN IMMEDIATE")', self.source)
+
+    def test_event_schema_v2_is_a_release_gate(self):
+        for table in (
+            "event_time_options",
+            "event_time_votes",
+            "event_reminder_state",
+        ):
+            self.assertIn(f'"{table}"', self.source)
+        self.assertIn(
+            'SELECT MAX(version) FROM event_schema_migrations',
+            self.source,
+        )
+        self.assertIn("EVENT_SCHEMA_VERSION", self.source)
+        self.assertIn("EventStore._validate_v2(connection)", self.source)
+
+    def test_cross_version_deployers_share_stable_and_transition_locks(self):
+        for source in (self.source, self.legacy_source):
+            self.assertIn(
+                'lock_dir="/var/lock/mediabot-deploy.lock"',
+                source,
+            )
+            self.assertIn(
+                'legacy_lock_dir="/var/lock/mediabot-v09-deploy.lock"',
+                source,
+            )
+            trap = source.index("trap 'on_exit")
+            stable = source.index('mkdir "$lock_dir"', trap)
+            legacy = source.index('mkdir "$legacy_lock_dir"', stable)
+            self.assertLess(trap, stable)
+            self.assertLess(stable, legacy)
+            on_exit = source[source.index("on_exit() {"):source.index("wait_for_health() {")]
+            self.assertLess(
+                on_exit.index('rmdir "$legacy_lock_dir"'),
+                on_exit.index('rmdir "$lock_dir"'),
+            )
 
     def test_release_gates_cover_runtime_and_container_hardening(self):
         required = (

@@ -298,37 +298,87 @@ not automate replacement or deletion: playback remediation can be destructive
 and remains an administrator decision.
 
 
-## v0.8 Event Lifecycle
+## v0.10 Event Lifecycle
 
 Events are generic, guild-scoped ballots rather than a Spooktober-specific
 table or command family:
 
 ```text
-OPEN -> SCHEDULED -> COMPLETED
-  `----------------> CANCELLED
+                reschedule
+                    |
+                    v
+OPEN <---------> SCHEDULED ---------> COMPLETED
+  |                |                      |
+  `----------------+----> CANCELLED       |
+             reopen          |            |
+                             `------.------'
+                                    v
+                             ARCHIVED (soft-hide)
 ```
 
-Each guild may have one open ballot while retaining any number of older
-scheduled events. Users nominate exact Seerr/TMDB movie or TV results and vote
-within the event's saved limit. Ranking is deterministic: vote count descending,
-then nomination creation order. Scheduling is a revision-checked transaction;
-if a nomination or vote changes after preview, confirmation fails and the
-organizer must review a fresh plan rather than freezing stale results.
+`ARCHIVED` is a visibility state recorded by `archived_at`, not a destructive
+status transition. Completed and cancelled rows, nominations, votes, slots,
+and reminder history remain in SQLite for `$event history` and operational
+audit. The current-event lookup excludes archived and expired schedules, so a
+past event cannot permanently occupy the dashboard.
+
+Each guild may have one open ballot while retaining any number of scheduled
+and historical events. Users nominate exact Seerr/TMDB movie or TV results and
+vote within the event's saved title limit. Ranking is deterministic: vote count
+descending, then nomination creation order. Candidate dates are stored in
+`event_time_options`; each member's availability is a many-to-many selection
+in `event_time_votes`. Title and time changes advance the same event revision,
+so a schedule preview cannot silently publish stale ballot state.
+
+The primary Discord UI is a restart-safe dashboard with persistent custom IDs.
+It opens private title and availability selectors, plus an administrator-only
+date/time picker and management view. Discord does not expose a native bot
+calendar-picker component, so the common path combines a near-term date select,
+30-minute time select, and exact local-time modal. Text commands remain a fully
+supported fallback. Transient picker and preview cards retain the shared
+five-minute cleanup contract; successful receipts and the dashboard remain.
 
 Generic schedules accept comma-separated local `YYYY-MM-DD HH:MM` values in
 the event timezone. The parser rejects malformed, duplicate, nonexistent DST,
 and ambiguous DST times. Storage is UTC; `$event tonight` converts a local
 calendar-day boundary into UTC and reads all matching scheduled slots.
+Scheduling is still a revision-checked transaction, but it is no longer
+irreversible. Rescheduling updates stable slot rows where possible, clears
+reminder stages only for changed slots, and lets the Discord adapter edit the
+corresponding native event. Reopening deletes the frozen slots, removes their
+native Discord events, and returns the ballot to `OPEN` with its nominations,
+title votes, and candidate-time votes intact.
+
+Every future slot is mirrored to a guild-only external Discord Scheduled Event.
+`event_slots.native_scheduled_event_id` is the fast identity path; a description
+marker provides idempotent recovery when the local ID was not persisted after a
+remote success. MediaBot is authoritative for title, description, location,
+start time, end time, entity type, and scheduled status. A
+missing permission or transient Discord failure is logged and retried by the
+event reconciliation worker rather than rolling back the local schedule.
+
+The same worker reads durable `event_reminder_state` rows and sends at most one
+24-hour, 1-hour, and start-time reminder per slot. Advancing a late stage marks
+all earlier stages delivered, preventing a restart or delayed worker from
+dumping several obsolete reminders at once. The worker claims a stage before
+calling Discord: an ambiguous delivery failure can sacrifice that one reminder,
+but a restart cannot duplicate a role ping. Native event reconciliation remains
+retryable. The claim also compares the saved event and exact slot timestamp, so
+a stale worker snapshot cannot consume reminders after an administrator moves
+the event. A configured ping role is valid only for a single allowed guild;
+multi-guild deployments send quiet reminders. After the configured grace period beyond the final slot, the worker
+completes the event and retires its durable dashboard controls. Administrators
+may explicitly complete, cancel, archive, or clear old events; cancellation and
+reopening also retire native events.
 
 Spooktober is a versioned preset on the same engine. Creation snapshots its
 movie-only Horror rule and exact October slot timestamps into the event row,
 so a later bot upgrade cannot mutate an active year's ballot. Empty preset
 slots remain explicit TBD entries when fewer titles are nominated than nights.
 
-v0.8 intentionally does not auto-request winners, post reminders, replace
-Discord calendar tooling, or retain persistent component callbacks across a
-restart. Successful vote/schedule receipts remain static; unfinished controls
-follow the durable five-minute cleanup lifecycle.
+Events still do not auto-request winners. Seerr remains the only video request
+broker, and scheduling remains a social-planning action rather than permission
+to acquire media.
 
 
 ### Existing-series episode lifecycle

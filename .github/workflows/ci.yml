@@ -44,8 +44,8 @@ jobs:
 
       - name: Check deployment script syntax
         run: |
-          test -x scripts/deploy_v09.sh
-          sh -n scripts/deploy_v09.sh
+          test -x scripts/deploy_v010.sh
+          sh -n scripts/deploy_v010.sh
 
       - name: Run full unit-test suite
         run: python -m unittest discover -s tests -q

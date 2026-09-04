@@ -5,7 +5,7 @@ stack. It gives household users one small, consistent command surface while
 leaving media search, approval, acquisition, and playback with the services
 that already own those jobs.
 
-Current source version: **0.9.1**
+Current source version: **0.10.0**
 
 ## What it does
 
@@ -18,8 +18,8 @@ Current source version: **0.9.1**
 - Requests exact music tracks through SoulSync.
 - Reconciles video, episode, and music progress through one `$status` command.
 - Files exact Jellyfin playback reports into a guild-local administrator queue.
-- Runs reusable media-night ballots with nominations, voting, scheduling, and
-  a read-only tonight view.
+- Runs reusable media-night ballots with title and availability voting,
+  editable schedules, Discord Scheduled Events, reminders, and history.
 - Cleans up abandoned interactive messages after five minutes while preserving
   successful receipts.
 
@@ -40,7 +40,18 @@ The default prefix is `$`.
 | `$rate <title> <1-10>` | Choose an exact title and save a durable rating. Run `$rate` alone to list ratings. |
 | `$status <title or #request>` | Reconcile library, request, episode, and music state. |
 | `$report <title> [SxxExx]` | File a playback-problem report for exact Jellyfin media. |
-| `$event` | Open the current event dashboard; nominate, vote, schedule, or view tonight. |
+| `$event` | Open the current event dashboard and its restart-safe controls. |
+| `$event create <name> [--votes N]` | Administrator: open a reusable media-night ballot. |
+| `$event nominate <title> [year]` | Search for and add one exact movie or show; this does not request it. |
+| `$event vote` | Open your title ballot. |
+| `$event time [YYYY-MM-DD HH:MM,...]` | Vote on proposed times, or let an administrator add times with selectors or text. |
+| `$event schedule [YYYY-MM-DD HH:MM,...]` | Administrator: preview and publish the ranked lineup. |
+| `$event reschedule <id> [YYYY-MM-DD HH:MM,...]` | Administrator: move an existing schedule without rebuilding its ballot. |
+| `$event reopen <id>` | Administrator: return a scheduled event to nominations and voting. |
+| `$event tonight` | Show the guild's scheduled lineup for the current local day. |
+| `$event history` | Show recent completed, cancelled, and archived events. |
+| `$event complete\|cancel\|archive <id>` | Administrator: close or soft-hide one event. |
+| `$event clear` | Administrator: complete expired schedules and archive terminal events. |
 | `$new [count]` | Show recently added Jellyfin media. |
 | `$help [command]` | Show the current user-facing command model and generated details. |
 
@@ -56,6 +67,28 @@ $recommend Fantasy Romance --count 4
 $recommend (Fantasy and Romance) or Action --count 3
 $discover Comedy --random --count 3
 ```
+
+### Event workflow
+
+An administrator creates an event, members nominate exact Seerr results, and
+members vote independently on titles and every proposed time they can attend.
+The durable dashboard exposes **Vote titles**, **Vote times**, and administrator
+management controls, so the useful path does not require memorizing every
+subcommand.
+
+Discord does not provide bots with a native calendar-picker component.
+MediaBot uses date and time selectors for the common path plus a **Custom**
+modal for an exact local `YYYY-MM-DD HH:MM` value. Plain-text commands remain
+available for accessibility and fast administration. Times are saved in UTC
+and rendered with Discord timestamps so each reader sees their own timezone.
+
+Scheduling closes voting for now rather than making the ballot immutable. An
+administrator can reschedule it or reopen voting. Each future slot is mirrored
+to a native Discord Scheduled Event when the bot has event permissions, and a
+restart-safe worker sends 24-hour, 1-hour, and start-time reminders. Completed
+and cancelled events remain auditable in history; archive and clear only hide
+them from the active dashboard. Unfinished transient cards still disappear
+after five minutes, while the event dashboard and successful actions persist.
 
 ## Architecture
 
@@ -81,7 +114,8 @@ its local 1-10 rating store authoritative.
 
 - Docker Engine with Docker Compose v2 (recommended), or Python 3.13.
 - A Discord bot application with **Message Content Intent** and **Server
-  Members Intent** enabled.
+  Members Intent** enabled. Grant **Create Events** and **Manage Events** for
+  native Discord Scheduled Event publishing, edits, and cleanup.
 - A Seerr instance and API key.
 - A writable persistent data directory for SQLite, logs, and the runtime health
   heartbeat.
@@ -121,6 +155,14 @@ Operational settings include `DB_PATH`, `LOG_PATH`, `LOG_MAX_BYTES`,
 `LOG_BACKUP_COUNT`, `RUNTIME_HEALTH_PATH`, `REQUEST_UI_TIMEOUT`,
 `JELLYFIN_POLL_SECONDS`, and `MEDIA_SUBMISSION_DRAIN_SECONDS`. The Compose
 defaults expect these writable files beneath `/app/data`.
+
+Event operations use `EVENT_RECONCILE_SECONDS` (worker interval, minimum 30),
+`EVENT_COMPLETION_GRACE_HOURS` (delay after the last slot before automatic
+completion, minimum 1), and `EVENT_REMINDER_MENTION` (an optional role ID or
+`<@&ROLE_ID>`; blank by default for quiet reminders). Because role IDs belong
+to one Discord guild, the ping setting is accepted only when exactly one
+`ALLOWED_GUILD_ID` is configured; multi-guild deployments must leave it blank.
+Arbitrary user mentions and `@everyone` are rejected.
 
 Never commit `.env`, a database, logs, runtime health snapshots, recovery
 bundles, or provider credentials.
@@ -168,8 +210,8 @@ The repository uses the standard library `unittest` runner:
 python -m pip check
 python -m compileall -q app.py mediabot scripts tests
 python -m unittest discover -s tests -q
-test -x scripts/deploy_v09.sh
-sh -n scripts/deploy_v09.sh
+test -x scripts/deploy_v010.sh
+sh -n scripts/deploy_v010.sh
 ```
 
 The GitHub Actions workflow runs the same dependency, compilation, deployer
@@ -177,7 +219,7 @@ syntax, and full unit-test gates on Python 3.13.
 
 ## Deployment note
 
-`scripts/deploy_v09.sh` is a guarded, transactional deployer for the original
+`scripts/deploy_v010.sh` is a guarded, transactional deployer for the original
 Compose layout. It backs up the runtime and SQLite database, verifies hashes
 and database integrity, performs security and health gates, and rolls back on
 failure. It is intentionally opinionated: audit its target paths, service
