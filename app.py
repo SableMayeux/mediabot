@@ -117,7 +117,7 @@ DB_PATH = os.environ.get(
 
 PREFIX = "$"
 
-BOT_VERSION = "0.10.0"
+BOT_VERSION = "1.0.0"
 
 
 def parse_allowed_guild_ids(value):

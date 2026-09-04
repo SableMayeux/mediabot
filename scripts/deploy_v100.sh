@@ -1,11 +1,11 @@
 #!/bin/sh
 set -eu
 
-# Transactional MediaBot v0.10.0 deployment for MediaServer.
+# Transactional MediaBot v1.0.0 deployment for MediaServer.
 #
 # Usage (run as root on MediaServer):
 #   MEDIABOT_ALLOWED_GUILD_IDS="123456789012345678" \
-#       /path/to/deploy_v010.sh /tmp/mediabot-v0100-<unique-id>
+#       /path/to/deploy_v100.sh /tmp/mediabot-v100-<unique-id>
 #
 # MEDIABOT_ALLOWED_GUILD_IDS is a deployment input. The script writes both that
 # name and the application's ALLOWED_GUILD_IDS compatibility name to .env. If
@@ -13,8 +13,8 @@ set -eu
 
 umask 077
 
-release_version="0.10.0"
-stage_namespace="/tmp/mediabot-v0100-"
+release_version="1.0.0"
+stage_namespace="/tmp/mediabot-v100-"
 target="/opt/stacks/mediabot"
 container="mediabot"
 service="mediabot"
@@ -332,7 +332,7 @@ wait_for_health() {
 # 1. Validate invocation, immutable stage boundaries, and prerequisites.
 # ---------------------------------------------------------------------------
 
-say "1. Validate v0.10.0 stage, deployment input, and host prerequisites"
+say "1. Validate v1.0.0 stage, deployment input, and host prerequisites"
 
 test "$(id -u)" -eq 0 || die "Run this deployment as root."
 case "$rollback_drill" in
@@ -349,7 +349,7 @@ test ! -L "$stage" || die "Stage directory may not be a symbolic link."
 stage="$(readlink -f -- "$stage")"
 case "$stage" in
     "$stage_namespace"*) ;;
-    *) die "Resolved stage escaped the v0.10.0 staging namespace." ;;
+    *) die "Resolved stage escaped the v1.0.0 staging namespace." ;;
 esac
 
 test -d "$target" || die "Target stack is missing: $target"
@@ -366,10 +366,10 @@ mkdir "$legacy_lock_dir" 2>/dev/null \
 legacy_lock_held=1
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-backup_rel=".codex-backups/${stamp}-v0100"
+backup_rel=".codex-backups/${stamp}-v100"
 backup="$target/$backup_rel"
-candidate_image="mediabot-v0100-candidate:${stamp}"
-rollback_image="mediabot-rollback:pre-v0100-${stamp}"
+candidate_image="mediabot-v100-candidate:${stamp}"
+rollback_image="mediabot-rollback:pre-v100-${stamp}"
 release_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 for name in $manifest_files; do
@@ -475,7 +475,7 @@ docker image tag "$old_image_id" "$rollback_image" >/dev/null
 # 2. Compile, test, and build the exact staged release before downtime.
 # ---------------------------------------------------------------------------
 
-say "2. Compile, test, and build the exact staged v0.10.0 release"
+say "2. Compile, test, and build the exact staged v1.0.0 release"
 
 docker build --tag "$candidate_image" "$stage"
 docker run --rm --network none --read-only --tmpfs /tmp:size=128m \
@@ -735,7 +735,7 @@ docker run --rm --network none --read-only --tmpfs /tmp:size=32m \
     --entrypoint python "$candidate_image" -c '
 import os, sqlite3
 root = "/app/data"
-probe = os.path.join(root, ".mediabot-write-probe-v0100")
+probe = os.path.join(root, ".mediabot-write-probe-v100")
 descriptor = os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640)
 try:
     os.write(descriptor, b"ok\n")
@@ -757,7 +757,7 @@ finally:
 # 7. Rebuild/recreate, then wait on the application-level heartbeat.
 # ---------------------------------------------------------------------------
 
-say "7. Build and recreate MediaBot v0.10.0"
+say "7. Build and recreate MediaBot v1.0.0"
 (cd "$target" && docker compose up -d --build --force-recreate "$service")
 bot_stopped=0
 
@@ -765,7 +765,7 @@ say "8. Poll application health and validate exact source/version/schema/provide
 wait_for_health || die "MediaBot did not become healthy within 240 seconds."
 
 if test "$rollback_drill" -eq 1; then
-    say "Rollback drill reached a healthy v0.10.0 candidate; forcing guarded rollback."
+    say "Rollback drill reached a healthy v1.0.0 candidate; forcing guarded rollback."
     die "Intentional rollback drill trigger."
 fi
 
@@ -861,7 +861,7 @@ for relative in sorted(paths):
         digest.update(handle.read())
 print(digest.hexdigest())
 ')"
-test "$source_digest" = "$container_digest" || die "Running source does not match staged v0.10.0 source."
+test "$source_digest" = "$container_digest" || die "Running source does not match staged v1.0.0 source."
 
 # ---------------------------------------------------------------------------
 # 9. Enforce container security, permissions, log caps, and clean startup.
@@ -917,7 +917,7 @@ test -z "$(find "$target/mediabot" -type f ! -perm 0644 -print -quit)" \
 test -z "$(find "$target/mediabot" ! -user root -o ! -group root | head -n 1)" \
     || die "Package ownership is incorrect."
 
-log_probe="$(mktemp /tmp/mediabot-v0100-logs.XXXXXX)"
+log_probe="$(mktemp /tmp/mediabot-v100-logs.XXXXXX)"
 chmod 600 "$log_probe"
 docker logs --since "$release_started_at" "$container" >"$log_probe" 2>&1 \
     || die "Could not read fresh MediaBot logs."
@@ -945,6 +945,6 @@ if test -n "$candidate_image"; then
     docker image rm "$candidate_image" >/dev/null 2>&1 || :
 fi
 
-say "10. MediaBot v0.10.0 deployment passed every release gate"
+say "10. MediaBot v1.0.0 deployment passed every release gate"
 say "Rollback backup: $backup"
 say "Rollback image: $rollback_image"

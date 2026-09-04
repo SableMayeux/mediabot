@@ -23,7 +23,7 @@ class AppImportTests(unittest.TestCase):
             import app
             from mediabot.providers.seerr import SeerrProvider
 
-            self.assertEqual(app.BOT_VERSION, "0.10.0")
+            self.assertEqual(app.BOT_VERSION, "1.0.0")
             self.assertIsInstance(app.seerr, SeerrProvider)
             self.assertEqual(app.seerr.api_key, "test-key")
             for command_name in ("discover", "recommend", "rate", "report"):

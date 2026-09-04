@@ -40,7 +40,7 @@ services:
         - --path
         - /app/data/runtime-health.json
         - --version
-        - 0.10.0
+        - 1.0.0
         - --max-age
         - "120"
       interval: 30s

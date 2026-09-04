@@ -5,6 +5,24 @@ All notable changes to Dogginator MediaBot are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses semantic version numbers.
 
+## [1.0.0] - 2026-09-04
+
+### Changed
+
+- Promoted the unified request, discovery, recommendation, rating, status,
+  report, and event command model to the first stable release contract.
+- Declared the durable request/event stores and current provider boundaries
+  stable for compatible 1.x migrations.
+- Reserved 2.x for integrations beyond the current personal-media stack.
+- Renamed the guarded deployment entry point for the 1.0 release line.
+
+### Verified
+
+- Re-ran the complete command, provider, storage, event-lifecycle, security,
+  shutdown, deployment, and rollback regression suite before promotion.
+- Kept the v0.10 event schema additive; this release requires no destructive
+  database migration.
+
 ## [0.10.0] - 2026-09-04
 
 ### Added
