@@ -9,6 +9,7 @@ from mediabot.core.event_store import (
     EventStore,
     OpenEventExistsError,
     StaleEventRevisionError,
+    TimeOptionNotFoundError,
     VoteLimitExceededError,
 )
 from mediabot.events.presets.spooktober import build_spooktober_preset
@@ -16,6 +17,7 @@ from mediabot.services.events import (
     EventService,
     EventStatus,
     EventUsageError,
+    ReminderStage,
     ScheduleAssignment,
     local_day_utc_bounds,
     parse_schedule_input,
@@ -194,6 +196,160 @@ class EventServiceTests(unittest.TestCase):
             [first.nomination_id, second.nomination_id],
         )
 
+    def test_time_options_rank_by_votes_then_earliest_and_drive_generic_schedule(self):
+        event = self.create_event()
+        alien = self.nominate(event.event_id, 348, "Alien")
+        early = datetime(2026, 10, 15, 18, tzinfo=DENVER)
+        late = datetime(2026, 10, 15, 20, tzinfo=DENVER)
+        options = self.service.add_time_options(
+            event.event_id,
+            (late, early),
+            created_by_discord_id=3,
+        )
+        by_time = {option.starts_at: option for option in options}
+        early_id = by_time[early].time_option_id
+        late_id = by_time[late].time_option_id
+
+        first_vote = self.service.replace_time_votes(
+            event.event_id,
+            11,
+            (early_id, late_id),
+        )
+        self.assertEqual(
+            set(first_vote.selected_time_option_ids),
+            {early_id, late_id},
+        )
+        tied = self.service.ranked_time_options(event.event_id)
+        self.assertEqual([value.time_option_id for value in tied], [early_id, late_id])
+
+        self.service.replace_time_votes(event.event_id, 12, (late_id,))
+        ranked = self.service.ranked_time_options(event.event_id)
+        plan = self.service.build_ranked_schedule(event.event_id)
+        self.assertEqual(ranked[0].time_option_id, late_id)
+        self.assertEqual(plan.assignments[0].starts_at, late)
+        self.assertEqual(plan.assignments[0].nomination_id, alien.nomination_id)
+
+        with self.assertRaises(TimeOptionNotFoundError):
+            self.service.replace_time_votes(event.event_id, 13, (99999,))
+
+    def test_replacing_time_options_preserves_only_unchanged_option_votes(self):
+        event = self.create_event()
+        first = datetime(2026, 10, 15, 18, tzinfo=DENVER)
+        retained = datetime(2026, 10, 15, 20, tzinfo=DENVER)
+        replacement = datetime(2026, 10, 16, 20, tzinfo=DENVER)
+        original = self.service.add_time_options(event.event_id, (first, retained), 3)
+        ids = {option.starts_at: option.time_option_id for option in original}
+        self.service.replace_time_votes(
+            event.event_id,
+            11,
+            (ids[first], ids[retained]),
+        )
+
+        current = self.service.replace_time_options(
+            event.event_id,
+            (retained, replacement),
+            3,
+        )
+        current_by_time = {option.starts_at: option for option in current}
+        self.assertEqual(current_by_time[retained].time_option_id, ids[retained])
+        self.assertEqual(current_by_time[retained].vote_count, 1)
+        self.assertEqual(current_by_time[replacement].vote_count, 0)
+        self.assertEqual(
+            self.service.user_time_vote_ids(event.event_id, 11),
+            (ids[retained],),
+        )
+
+    def test_candidate_times_fit_one_discord_select(self):
+        event = self.create_event()
+        options = tuple(
+            datetime(2026, 10, 1, 19, tzinfo=DENVER) + timedelta(days=index)
+            for index in range(25)
+        )
+        self.assertEqual(
+            len(self.service.replace_time_options(event.event_id, options, 3)),
+            25,
+        )
+        with self.assertRaisesRegex(EventUsageError, "at most 25"):
+            self.service.add_time_options(
+                event.event_id,
+                (datetime(2026, 11, 1, 19, tzinfo=DENVER),),
+                3,
+            )
+        with self.assertRaisesRegex(EventUsageError, "at most 25"):
+            self.service.replace_time_options(
+                event.event_id,
+                options + (datetime(2026, 11, 1, 19, tzinfo=DENVER),),
+                3,
+            )
+
+    def test_expired_time_winner_does_not_strand_future_runner_up(self):
+        event = self.create_event()
+        self.nominate(event.event_id, 348, "Alien")
+        reference = datetime(2026, 10, 15, 19, tzinfo=DENVER)
+        expired = reference - timedelta(minutes=1)
+        upcoming = reference + timedelta(hours=1)
+        options = self.service.add_time_options(
+            event.event_id,
+            (expired, upcoming),
+            3,
+        )
+        by_time = {option.starts_at: option for option in options}
+        expired_id = by_time[expired.astimezone(timezone.utc)].time_option_id
+        upcoming_id = by_time[upcoming.astimezone(timezone.utc)].time_option_id
+        self.service.store.replace_time_votes(
+            event_id=event.event_id,
+            discord_user_id=10,
+            time_option_ids=(expired_id,),
+        )
+        self.service.store.replace_time_votes(
+            event_id=event.event_id,
+            discord_user_id=11,
+            time_option_ids=(expired_id,),
+        )
+        self.service.store.replace_time_votes(
+            event_id=event.event_id,
+            discord_user_id=12,
+            time_option_ids=(upcoming_id,),
+        )
+
+        future = self.service.future_time_options(
+            event.event_id,
+            reference=reference,
+            ranked=True,
+        )
+        plan = self.service.build_ranked_schedule(
+            event.event_id,
+            reference=reference,
+        )
+
+        self.assertEqual([option.time_option_id for option in future], [upcoming_id])
+        self.assertEqual(plan.assignments[0].starts_at, upcoming.astimezone(timezone.utc))
+        with self.assertRaisesRegex(EventUsageError, "already passed"):
+            self.service.replace_time_votes(
+                event.event_id,
+                13,
+                (expired_id,),
+                reference=reference,
+            )
+
+    def test_expired_candidates_do_not_consume_the_actionable_option_cap(self):
+        event = self.create_event()
+        reference = datetime.now(timezone.utc)
+        expired = tuple(
+            reference - timedelta(days=index + 1)
+            for index in range(25)
+        )
+        self.service.add_time_options(event.event_id, expired, 3)
+        upcoming = reference + timedelta(days=1)
+
+        self.service.add_time_options(event.event_id, (upcoming,), 3)
+
+        self.assertEqual(len(self.service.time_options(event.event_id)), 26)
+        self.assertEqual(
+            [option.starts_at for option in self.service.future_time_options(event.event_id)],
+            [upcoming],
+        )
+
     def test_schedule_rejects_duplicate_titles_when_repeats_are_disabled(self):
         event = self.create_event()
         alien = self.nominate(event.event_id, 348, "Alien")
@@ -262,6 +418,63 @@ class EventServiceTests(unittest.TestCase):
             [slot.nomination_id for slot in slots],
             [alien.nomination_id, thing.nomination_id],
         )
+
+    def test_preset_reschedule_moves_existing_slots_without_rewriting_lineup(self):
+        preset = build_spooktober_preset(
+            year=2026,
+            nights=(15, 16),
+            vote_limit=2,
+        )
+        event = self.service.create_event(
+            discord_guild_id=89,
+            discord_channel_id=2,
+            created_by_discord_id=3,
+            preset=preset,
+        )
+        alien = self.nominate(event.event_id, 348, "Alien")
+        thing = self.nominate(event.event_id, 1091, "The Thing")
+
+        with self.assertRaisesRegex(EventUsageError, "preset's dates changed"):
+            self.service.schedule_event(
+                event_id=event.event_id,
+                assignments=(
+                    ScheduleAssignment(
+                        datetime(2026, 10, 15, 20, tzinfo=DENVER),
+                        alien.nomination_id,
+                    ),
+                    ScheduleAssignment(
+                        datetime(2026, 10, 16, 20, tzinfo=DENVER),
+                        thing.nomination_id,
+                    ),
+                ),
+            )
+
+        _, original = self.service.schedule_ranked(
+            self.service.build_ranked_schedule(event.event_id)
+        )
+        self.service.set_native_scheduled_event_id(original[0].slot_id, 8101)
+        self.service.set_native_scheduled_event_id(original[1].slot_id, 8102)
+        moved_times = tuple(slot.starts_at + timedelta(hours=1) for slot in original)
+
+        rescheduled, changed = self.service.reschedule_event(
+            event.event_id,
+            tuple(
+                ScheduleAssignment(starts_at, slot.nomination_id)
+                for starts_at, slot in zip(moved_times, original)
+            ),
+        )
+
+        self.assertEqual(rescheduled.status, EventStatus.SCHEDULED)
+        self.assertEqual([slot.slot_id for slot in changed], [slot.slot_id for slot in original])
+        self.assertEqual(
+            [slot.nomination_id for slot in changed],
+            [alien.nomination_id, thing.nomination_id],
+        )
+        self.assertEqual(
+            [slot.native_scheduled_event_id for slot in changed],
+            [8101, 8102],
+        )
+        self.assertEqual(tuple(slot.starts_at for slot in changed), moved_times)
 
     def test_denver_tonight_uses_local_day_and_survives_service_restart(self):
         event = self.create_event(guild_id=41)
@@ -398,6 +611,163 @@ class EventServiceTests(unittest.TestCase):
         self.assertEqual(completed.status, EventStatus.COMPLETED)
         with self.assertRaises(EventStateError):
             self.service.cancel(completed.event_id)
+        archived = self.service.archive(completed.event_id)
+        self.assertIsNotNone(archived.archived_at)
+
+    def test_reschedule_preserves_slot_and_native_ids_then_reopen_discards_slots(self):
+        event = self.create_event(guild_id=93)
+        alien = self.nominate(event.event_id, 348, "Alien")
+        thing = self.nominate(event.event_id, 1091, "The Thing")
+        scheduled, slots = self.service.schedule_event(
+            event_id=event.event_id,
+            assignments=(
+                ScheduleAssignment(
+                    datetime(2026, 10, 15, 19, tzinfo=DENVER),
+                    alien.nomination_id,
+                ),
+                ScheduleAssignment(
+                    datetime(2026, 10, 16, 19, tzinfo=DENVER),
+                    thing.nomination_id,
+                ),
+            ),
+        )
+        self.service.set_native_scheduled_event_id(slots[0].slot_id, 8001)
+        self.service.set_native_scheduled_event_id(slots[1].slot_id, 8002)
+
+        rescheduled, changed = self.service.reschedule_event(
+            event.event_id,
+            (
+                ScheduleAssignment(
+                    datetime(2026, 10, 15, 20, tzinfo=DENVER),
+                    alien.nomination_id,
+                ),
+                ScheduleAssignment(
+                    datetime(2026, 10, 16, 20, tzinfo=DENVER),
+                    thing.nomination_id,
+                ),
+            ),
+        )
+        self.assertEqual(rescheduled.status, EventStatus.SCHEDULED)
+        self.assertEqual([slot.slot_id for slot in changed], [slot.slot_id for slot in slots])
+        self.assertEqual(
+            [slot.native_scheduled_event_id for slot in changed],
+            [8001, 8002],
+        )
+
+        with self.assertRaisesRegex(StaleEventRevisionError, "schedule changed"):
+            self.service.reschedule_event(
+                event.event_id,
+                (
+                    ScheduleAssignment(
+                        datetime(2026, 10, 15, 21, tzinfo=DENVER),
+                        alien.nomination_id,
+                    ),
+                    ScheduleAssignment(
+                        datetime(2026, 10, 16, 21, tzinfo=DENVER),
+                        thing.nomination_id,
+                    ),
+                ),
+                expected_revision=scheduled.revision,
+            )
+        self.assertEqual(
+            tuple(slot.starts_at for slot in self.service.slots(event.event_id)),
+            (
+                datetime(2026, 10, 15, 20, tzinfo=DENVER).astimezone(timezone.utc),
+                datetime(2026, 10, 16, 20, tzinfo=DENVER).astimezone(timezone.utc),
+            ),
+        )
+
+        reopened = self.service.reopen(event.event_id)
+        self.assertEqual(reopened.status, EventStatus.OPEN)
+        self.assertEqual(self.service.slots(event.event_id), ())
+
+    def test_archive_and_clear_old_hide_terminal_and_past_schedules(self):
+        terminal = self.create_event(guild_id=94, name="Cancelled")
+        self.service.cancel(terminal.event_id)
+
+        stale = self.create_event(guild_id=94, name="Yesterday")
+        alien = self.nominate(stale.event_id, 348, "Alien")
+        self.service.schedule_event(
+            event_id=stale.event_id,
+            assignments=(
+                ScheduleAssignment(
+                    datetime(2026, 10, 14, 19, tzinfo=DENVER),
+                    alien.nomination_id,
+                ),
+            ),
+        )
+        future = self.create_event(guild_id=94, name="Tomorrow")
+        thing = self.nominate(future.event_id, 1091, "The Thing")
+        self.service.schedule_event(
+            event_id=future.event_id,
+            assignments=(
+                ScheduleAssignment(
+                    datetime(2026, 10, 16, 19, tzinfo=DENVER),
+                    thing.nomination_id,
+                ),
+            ),
+        )
+
+        cleared = self.service.clear_old(
+            94,
+            datetime(2026, 10, 15, 19, tzinfo=DENVER),
+        )
+        self.assertEqual(
+            {event.event_id for event in cleared},
+            {terminal.event_id, stale.event_id},
+        )
+        self.assertTrue(all(event.archived_at is not None for event in cleared))
+        self.assertEqual(
+            [event.event_id for event in self.service.list_events(discord_guild_id=94)],
+            [future.event_id],
+        )
+        all_events = self.service.list_events(
+            discord_guild_id=94,
+            include_archived=True,
+        )
+        by_id = {event.event_id: event for event in all_events}
+        self.assertEqual(by_id[stale.event_id].status, EventStatus.COMPLETED)
+        self.assertEqual(by_id[future.event_id].status, EventStatus.SCHEDULED)
+
+    def test_reminder_stages_are_durable_and_restart_safe(self):
+        event = self.create_event(guild_id=95)
+        alien = self.nominate(event.event_id, 348, "Alien")
+        starts_at = datetime(2026, 10, 15, 19, tzinfo=DENVER)
+        _, slots = self.service.schedule_event(
+            event_id=event.event_id,
+            assignments=(ScheduleAssignment(starts_at, alien.nomination_id),),
+        )
+        slot = slots[0]
+
+        day = self.service.due_reminders(starts_at - timedelta(hours=23))
+        self.assertEqual(len(day), 1)
+        self.assertEqual(day[0].stage, int(ReminderStage.DAY))
+        self.assertEqual(day[0].title, "Alien")
+        self.service.advance_reminder(slot.slot_id, day[0].stage)
+
+        restarted = EventService(EventStore(self.db_path))
+        restarted.initialize()
+        self.assertEqual(
+            restarted.due_reminders(starts_at - timedelta(hours=22)),
+            (),
+        )
+        hour = restarted.due_reminders(starts_at - timedelta(minutes=30))
+        self.assertEqual(hour[0].stage, int(ReminderStage.HOUR))
+        self.assertEqual(
+            restarted.advance_reminder(slot.slot_id, hour[0].stage),
+            (1, 2),
+        )
+        start = restarted.due_reminders(starts_at + timedelta(seconds=1))
+        self.assertEqual(start[0].stage, int(ReminderStage.START))
+        self.assertEqual(
+            restarted.due_reminders(starts_at + timedelta(minutes=16)),
+            (),
+        )
+        self.assertEqual(restarted.advance_reminder(slot.slot_id, 3), (1, 2, 3))
+        self.assertEqual(
+            restarted.due_reminders(starts_at + timedelta(minutes=1)),
+            (),
+        )
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
-from enum import Enum
+from enum import Enum, IntEnum
 from typing import Any, Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -23,6 +23,7 @@ from mediabot.core.event_store import (
     NominationNotFoundError,
     OpenEventExistsError,
     StaleEventRevisionError,
+    TimeOptionNotFoundError,
     VoteLimitExceededError,
     parse_utc_text,
     utc_text,
@@ -32,6 +33,8 @@ from mediabot.events.presets.base import EventPresetSnapshot
 
 DEFAULT_EVENT_TIMEZONE = "America/Denver"
 MAX_EVENT_SCHEDULE_SLOTS = 31
+MAX_EVENT_TIME_OPTIONS = 25
+EVENT_REMINDER_START_GRACE = timedelta(minutes=15)
 SCHEDULE_INPUT_EXAMPLE = "2026-10-03 19:00, 2026-10-10 19:00"
 _LOCAL_SCHEDULE_VALUE = re.compile(
     r"^(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2}) "
@@ -48,6 +51,19 @@ class EventStatus(str, Enum):
     SCHEDULED = "scheduled"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
+
+
+class ReminderStage(IntEnum):
+    DAY = 1
+    HOUR = 2
+    START = 3
+
+
+_REMINDER_STORE_STAGE = {
+    ReminderStage.DAY: "24h",
+    ReminderStage.HOUR: "1h",
+    ReminderStage.START: "start",
+}
 
 
 def _optional_time(value: Any) -> datetime | None:
@@ -74,6 +90,7 @@ class EventRecord:
     scheduled_at: datetime | None
     completed_at: datetime | None
     cancelled_at: datetime | None
+    archived_at: datetime | None
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> "EventRecord":
@@ -102,6 +119,7 @@ class EventRecord:
             scheduled_at=_optional_time(row.get("scheduled_at")),
             completed_at=_optional_time(row.get("completed_at")),
             cancelled_at=_optional_time(row.get("cancelled_at")),
+            archived_at=_optional_time(row.get("archived_at")),
         )
 
 
@@ -161,6 +179,38 @@ class VoteResult:
 
 
 @dataclass(frozen=True)
+class TimeOptionRecord:
+    time_option_id: int
+    event_id: int
+    starts_at: datetime
+    created_by_discord_id: int
+    created_at: datetime
+    vote_count: int
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, Any]) -> "TimeOptionRecord":
+        return cls(
+            time_option_id=int(row["time_option_id"]),
+            event_id=int(row["event_id"]),
+            starts_at=parse_utc_text(str(row["starts_at_utc"])),
+            created_by_discord_id=int(row["created_by_discord_id"]),
+            created_at=parse_utc_text(str(row["created_at"])),
+            vote_count=int(row.get("vote_count") or 0),
+        )
+
+
+@dataclass(frozen=True)
+class TimeVoteResult:
+    discord_user_id: int
+    selected_time_option_ids: tuple[int, ...]
+    event_revision: int
+
+
+# App code can use the more explicit name without breaking the original API.
+EventTimeVoteResult = TimeVoteResult
+
+
+@dataclass(frozen=True)
 class ScheduleAssignment:
     starts_at: datetime
     nomination_id: int | None
@@ -195,6 +245,7 @@ class EventSlotRecord:
     year: str
     poster_path: str | None
     vote_count: int
+    native_scheduled_event_id: int | None
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> "EventSlotRecord":
@@ -230,7 +281,26 @@ class EventSlotRecord:
             year=str(row.get("year") or ""),
             poster_path=str(row["poster_path"]) if row.get("poster_path") else None,
             vote_count=int(row.get("vote_count") or 0),
+            native_scheduled_event_id=(
+                int(row["native_scheduled_event_id"])
+                if row.get("native_scheduled_event_id") is not None
+                else None
+            ),
         )
+
+
+@dataclass(frozen=True)
+class EventReminder:
+    slot_id: int
+    event_id: int
+    discord_guild_id: int
+    discord_channel_id: int
+    event_name: str
+    starts_at: datetime
+    title: str | None
+    year: str
+    jellyfin_item_id: str | None
+    stage: int
 
 
 def validate_timezone(timezone_name: str) -> str:
@@ -453,6 +523,7 @@ class EventService:
         discord_guild_id: int,
         statuses: Sequence[str | EventStatus] | None = None,
         limit: int = 100,
+        include_archived: bool = False,
     ) -> tuple[EventRecord, ...]:
         normalized = (
             tuple(
@@ -468,6 +539,7 @@ class EventService:
                 discord_guild_id=int(discord_guild_id),
                 statuses=normalized,
                 limit=int(limit),
+                include_archived=bool(include_archived),
             )
         )
 
@@ -484,6 +556,157 @@ class EventService:
                 discord_channel_id=int(discord_channel_id),
                 dashboard_message_id=int(dashboard_message_id),
             )
+        )
+
+    @staticmethod
+    def _normalized_times(starts_at: Sequence[datetime]) -> tuple[datetime, ...]:
+        normalized = tuple(_aware_datetime(value) for value in starts_at)
+        identities = tuple(utc_text(value) for value in normalized)
+        if len(set(identities)) != len(identities):
+            raise EventUsageError("A candidate date and time can only appear once.")
+        if len(normalized) > MAX_EVENT_TIME_OPTIONS:
+            raise EventUsageError(
+                f"An event can have at most {MAX_EVENT_TIME_OPTIONS} candidate times."
+            )
+        return normalized
+
+    def add_time_options(
+        self,
+        event_id: int,
+        starts_at: Sequence[datetime],
+        created_by_discord_id: int,
+    ) -> tuple[TimeOptionRecord, ...]:
+        event = self.event(int(event_id))
+        if event.rules.get("slot_times_utc"):
+            raise EventUsageError("This preset already has fixed event dates.")
+        normalized = self._normalized_times(starts_at)
+        if not normalized:
+            raise EventUsageError("Choose at least one candidate date and time.")
+        now = datetime.now(timezone.utc)
+        desired = {
+            utc_text(value)
+            for value in normalized
+            if value.astimezone(timezone.utc) > now
+        }
+        existing = {
+            utc_text(value.starts_at)
+            for value in self.future_time_options(event.event_id)
+        }
+        if len(existing | desired) > MAX_EVENT_TIME_OPTIONS:
+            raise EventUsageError(
+                f"An event can have at most {MAX_EVENT_TIME_OPTIONS} candidate times."
+            )
+        return tuple(
+            TimeOptionRecord.from_row(row)
+            for row in self.store.add_time_options(
+                event_id=event.event_id,
+                starts_at_utc=tuple(utc_text(value) for value in normalized),
+                created_by_discord_id=int(created_by_discord_id),
+            )
+        )
+
+    def replace_time_options(
+        self,
+        event_id: int,
+        starts_at: Sequence[datetime],
+        created_by_discord_id: int,
+    ) -> tuple[TimeOptionRecord, ...]:
+        event = self.event(int(event_id))
+        if event.rules.get("slot_times_utc"):
+            raise EventUsageError("This preset already has fixed event dates.")
+        normalized = self._normalized_times(starts_at)
+        return tuple(
+            TimeOptionRecord.from_row(row)
+            for row in self.store.replace_time_options(
+                event_id=event.event_id,
+                starts_at_utc=tuple(utc_text(value) for value in normalized),
+                created_by_discord_id=int(created_by_discord_id),
+            )
+        )
+
+    def time_options(self, event_id: int) -> tuple[TimeOptionRecord, ...]:
+        return tuple(
+            TimeOptionRecord.from_row(row)
+            for row in self.store.time_option_rows(int(event_id))
+        )
+
+    def ranked_time_options(self, event_id: int) -> tuple[TimeOptionRecord, ...]:
+        return tuple(
+            TimeOptionRecord.from_row(row)
+            for row in self.store.time_option_rows(int(event_id), ranked=True)
+        )
+
+    def future_time_options(
+        self,
+        event_id: int,
+        *,
+        reference: datetime | None = None,
+        ranked: bool = False,
+    ) -> tuple[TimeOptionRecord, ...]:
+        """Return actionable candidates while retaining expired vote history."""
+
+        now = (
+            datetime.now(timezone.utc)
+            if reference is None
+            else _aware_datetime(reference).astimezone(timezone.utc)
+        )
+        options = (
+            self.ranked_time_options(int(event_id))
+            if ranked
+            else self.time_options(int(event_id))
+        )
+        return tuple(option for option in options if option.starts_at > now)
+
+    def replace_time_votes(
+        self,
+        event_id: int,
+        discord_user_id: int,
+        time_option_ids: Sequence[int],
+        *,
+        reference: datetime | None = None,
+    ) -> TimeVoteResult:
+        normalized_ids = tuple(int(value) for value in time_option_ids)
+        if normalized_ids:
+            requested_ids = set(normalized_ids)
+            all_ids = {
+                option.time_option_id
+                for option in self.time_options(int(event_id))
+            }
+            if not requested_ids.issubset(all_ids):
+                raise TimeOptionNotFoundError(
+                    "Every selected time must be a candidate for this event."
+                )
+            future_ids = {
+                option.time_option_id
+                for option in self.future_time_options(
+                    int(event_id),
+                    reference=reference,
+                )
+            }
+            if not requested_ids.issubset(future_ids):
+                raise EventUsageError(
+                    "One or more candidate times have already passed. "
+                    "Open the availability ballot again."
+                )
+        choices, revision = self.store.replace_time_votes(
+            event_id=int(event_id),
+            discord_user_id=int(discord_user_id),
+            time_option_ids=normalized_ids,
+        )
+        return TimeVoteResult(
+            discord_user_id=int(discord_user_id),
+            selected_time_option_ids=choices,
+            event_revision=revision,
+        )
+
+    def user_time_vote_ids(
+        self,
+        event_id: int,
+        discord_user_id: int,
+    ) -> tuple[int, ...]:
+        return self.store.user_time_vote_ids(
+            event_id=int(event_id),
+            discord_user_id=int(discord_user_id),
         )
 
     def nominate(
@@ -590,6 +813,7 @@ class EventService:
         event_id: int,
         *,
         starts_at: Sequence[datetime] | None = None,
+        reference: datetime | None = None,
     ) -> SchedulePlan:
         """Build a deterministic preview; confirmation must pass its revision."""
 
@@ -600,11 +824,20 @@ class EventService:
         if starts_at is None:
             stored_times = event.rules.get("slot_times_utc", ())
             times = tuple(parse_utc_text(str(value)) for value in stored_times)
+            if not times:
+                ranked_times = self.future_time_options(
+                    event.event_id,
+                    reference=reference,
+                    ranked=True,
+                )
+                times = (ranked_times[0].starts_at,) if ranked_times else ()
         else:
             times = tuple(_aware_datetime(value) for value in starts_at)
 
         if not times:
-            raise EventUsageError("Choose at least one date and time to schedule.")
+            raise EventUsageError(
+                "Choose at least one future date and time to schedule."
+            )
         if len(times) > MAX_EVENT_SCHEDULE_SLOTS:
             raise EventUsageError(
                 f"An event can have at most {MAX_EVENT_SCHEDULE_SLOTS} scheduled slots."
@@ -649,6 +882,28 @@ class EventService:
         expected_revision: int | None = None,
     ) -> tuple[EventRecord, tuple[EventSlotRecord, ...]]:
         event = self.event(int(event_id))
+        normalized, starts = self._validated_assignments(event, assignments)
+
+        event_row, _ = self.store.freeze_schedule(
+            event_id=event.event_id,
+            assignments=tuple(zip(starts, (value.nomination_id for value in normalized))),
+            expected_revision=expected_revision,
+        )
+        return (
+            EventRecord.from_row(event_row),
+            tuple(
+                EventSlotRecord.from_row(row)
+                for row in self.store.slots_for_event(event.event_id)
+            ),
+        )
+
+    def _validated_assignments(
+        self,
+        event: EventRecord,
+        assignments: Sequence[ScheduleAssignment],
+        *,
+        enforce_preset_times: bool = True,
+    ) -> tuple[tuple[ScheduleAssignment, ...], tuple[str, ...]]:
         normalized = tuple(
             ScheduleAssignment(
                 starts_at=_aware_datetime(value.starts_at),
@@ -677,7 +932,7 @@ class EventService:
             str(value)
             for value in event.rules.get("slot_times_utc", ())
         )
-        if expected_slots and tuple(starts) != expected_slots:
+        if enforce_preset_times and expected_slots and tuple(starts) != expected_slots:
             raise EventUsageError(
                 "This preset's dates changed. Rebuild the schedule from the saved preset."
             )
@@ -691,8 +946,24 @@ class EventService:
             set(selected_ids)
         ) != len(selected_ids):
             raise EventUsageError("A title can only occupy one slot in this event.")
+        return normalized, starts
 
-        event_row, _ = self.store.freeze_schedule(
+    def reschedule_event(
+        self,
+        event_id: int,
+        assignments: Sequence[ScheduleAssignment],
+        *,
+        expected_revision: int | None = None,
+    ) -> tuple[EventRecord, tuple[EventSlotRecord, ...]]:
+        event = self.event(int(event_id))
+        if event.status is not EventStatus.SCHEDULED:
+            raise EventStateError("Only a scheduled event can be rescheduled.")
+        normalized, starts = self._validated_assignments(
+            event,
+            assignments,
+            enforce_preset_times=False,
+        )
+        event_row, _ = self.store.reschedule_event(
             event_id=event.event_id,
             assignments=tuple(zip(starts, (value.nomination_id for value in normalized))),
             expected_revision=expected_revision,
@@ -721,6 +992,122 @@ class EventService:
             for row in self.store.slots_for_event(int(event_id))
         )
 
+    def set_native_scheduled_event_id(
+        self,
+        slot_id: int,
+        native_scheduled_event_id: int | None,
+        *,
+        expected_event: EventRecord | None = None,
+        expected_slot: EventSlotRecord | None = None,
+    ) -> EventSlotRecord:
+        compare = expected_event is not None or expected_slot is not None
+        if compare and (expected_event is None or expected_slot is None):
+            raise ValueError("Native event identity requires both event and slot snapshots.")
+        return EventSlotRecord.from_row(
+            self.store.set_native_scheduled_event_id(
+                slot_id=int(slot_id),
+                native_scheduled_event_id=(
+                    int(native_scheduled_event_id)
+                    if native_scheduled_event_id is not None
+                    else None
+                ),
+                expected_event_id=(
+                    int(expected_event.event_id) if compare else None
+                ),
+                expected_event_revision=(
+                    int(expected_event.revision) if compare else None
+                ),
+                expected_starts_at_utc=(
+                    utc_text(expected_slot.starts_at) if compare else None
+                ),
+                expected_nomination_id=(
+                    expected_slot.nomination_id if compare else None
+                ),
+                expected_native_scheduled_event_id=(
+                    expected_slot.native_scheduled_event_id if compare else None
+                ),
+            )
+        )
+
+    def due_reminders(
+        self,
+        reference: datetime | None = None,
+    ) -> tuple[EventReminder, ...]:
+        now = (
+            datetime.now(timezone.utc)
+            if reference is None
+            else _aware_datetime(reference).astimezone(timezone.utc)
+        )
+        reminders: list[EventReminder] = []
+        for row in self.store.reminder_rows():
+            starts_at = parse_utc_text(str(row["starts_at_utc"]))
+            if now > starts_at + EVENT_REMINDER_START_GRACE:
+                continue
+            if now >= starts_at:
+                stage = ReminderStage.START
+            elif now >= starts_at - timedelta(hours=1):
+                stage = ReminderStage.HOUR
+            elif now >= starts_at - timedelta(hours=24):
+                stage = ReminderStage.DAY
+            else:
+                continue
+
+            advanced = {str(value) for value in row.get("advanced_stages", ())}
+            if _REMINDER_STORE_STAGE[stage] in advanced:
+                continue
+            reminders.append(
+                EventReminder(
+                    slot_id=int(row["slot_id"]),
+                    event_id=int(row["event_id"]),
+                    discord_guild_id=int(row["discord_guild_id"]),
+                    discord_channel_id=int(row["discord_channel_id"]),
+                    event_name=str(row["event_name"]),
+                    starts_at=starts_at,
+                    title=str(row["title"]) if row.get("title") else None,
+                    year=str(row.get("year") or ""),
+                    jellyfin_item_id=(
+                        str(row["jellyfin_item_id"])
+                        if row.get("jellyfin_item_id")
+                        else None
+                    ),
+                    stage=int(stage),
+                )
+            )
+        return tuple(reminders)
+
+    def advance_reminder(self, slot_id: int, stage: int) -> tuple[int, ...]:
+        try:
+            normalized = ReminderStage(int(stage))
+        except (TypeError, ValueError) as exc:
+            raise EventUsageError("Reminder stage must be 1, 2, or 3.") from exc
+        advanced = self.store.advance_reminder(
+            slot_id=int(slot_id),
+            stage=_REMINDER_STORE_STAGE[normalized],
+        )
+        reverse = {value: key for key, value in _REMINDER_STORE_STAGE.items()}
+        return tuple(int(reverse[value]) for value in advanced)
+
+    def claim_reminder(
+        self,
+        slot_id: int,
+        stage: int,
+        *,
+        event_id: int,
+        starts_at: datetime,
+    ) -> bool:
+        """Atomically claim a reminder before sending it (at-most-once semantics)."""
+
+        try:
+            normalized = ReminderStage(int(stage))
+        except (TypeError, ValueError) as exc:
+            raise EventUsageError("Reminder stage must be 1, 2, or 3.") from exc
+        return self.store.claim_reminder(
+            slot_id=int(slot_id),
+            event_id=int(event_id),
+            starts_at_utc=utc_text(_aware_datetime(starts_at)),
+            stage=_REMINDER_STORE_STAGE[normalized],
+        )
+
     def tonight(
         self,
         *,
@@ -741,11 +1128,55 @@ class EventService:
             )
         )
 
-    def complete(self, event_id: int) -> EventRecord:
-        return EventRecord.from_row(self.store.complete_event(int(event_id)))
+    def complete(
+        self,
+        event_id: int,
+        *,
+        expected_revision: int | None = None,
+    ) -> EventRecord:
+        return EventRecord.from_row(
+            self.store.complete_event(
+                int(event_id),
+                expected_revision=expected_revision,
+            )
+        )
 
-    def cancel(self, event_id: int) -> EventRecord:
-        return EventRecord.from_row(self.store.cancel_event(int(event_id)))
+    def cancel(
+        self,
+        event_id: int,
+        *,
+        expected_revision: int | None = None,
+    ) -> EventRecord:
+        return EventRecord.from_row(
+            self.store.cancel_event(
+                int(event_id),
+                expected_revision=expected_revision,
+            )
+        )
+
+    def reopen(self, event_id: int) -> EventRecord:
+        return EventRecord.from_row(self.store.reopen_event(int(event_id)))
+
+    def archive(self, event_id: int) -> EventRecord:
+        return EventRecord.from_row(self.store.archive_event(int(event_id)))
+
+    def clear_old(
+        self,
+        discord_guild_id: int,
+        reference: datetime | None = None,
+    ) -> tuple[EventRecord, ...]:
+        now = (
+            datetime.now(timezone.utc)
+            if reference is None
+            else _aware_datetime(reference).astimezone(timezone.utc)
+        )
+        return tuple(
+            EventRecord.from_row(row)
+            for row in self.store.clear_old_events(
+                discord_guild_id=int(discord_guild_id),
+                reference_utc=utc_text(now),
+            )
+        )
 
 
 def _aware_datetime(value: datetime) -> datetime:
@@ -756,23 +1187,31 @@ def _aware_datetime(value: datetime) -> datetime:
 
 __all__ = [
     "DEFAULT_EVENT_TIMEZONE",
+    "EVENT_REMINDER_START_GRACE",
     "MAX_EVENT_SCHEDULE_SLOTS",
+    "MAX_EVENT_TIME_OPTIONS",
     "EventConflictError",
     "EventNotFoundError",
+    "EventReminder",
     "EventRecord",
     "EventService",
     "EventSlotRecord",
     "EventStateError",
     "EventStatus",
+    "EventTimeVoteResult",
     "EventUsageError",
     "NominationNotFoundError",
     "NominationRecord",
     "NominationResult",
     "OpenEventExistsError",
     "RankedNomination",
+    "ReminderStage",
     "ScheduleAssignment",
     "SchedulePlan",
     "StaleEventRevisionError",
+    "TimeOptionNotFoundError",
+    "TimeOptionRecord",
+    "TimeVoteResult",
     "VoteLimitExceededError",
     "VoteResult",
     "local_day_utc_bounds",
