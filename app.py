@@ -10,7 +10,7 @@ import secrets
 import signal
 import time
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from zoneinfo import ZoneInfo
 
@@ -89,6 +89,7 @@ from mediabot.services.events import (
     EventStatus,
     EventUsageError,
     OpenEventExistsError,
+    ScheduleAssignment,
     StaleEventRevisionError,
     VoteLimitExceededError,
     parse_schedule_input,
@@ -116,7 +117,7 @@ DB_PATH = os.environ.get(
 
 PREFIX = "$"
 
-BOT_VERSION = "0.9.1"
+BOT_VERSION = "0.10.0"
 
 
 def parse_allowed_guild_ids(value):
@@ -129,6 +130,31 @@ def parse_allowed_guild_ids(value):
             raise ValueError("ALLOWED_GUILD_IDS must contain positive Discord IDs.")
         guild_ids.add(int(normalized))
     return frozenset(guild_ids)
+
+
+def parse_event_reminder_role_id(value):
+    """Accept only a Discord role ID/mention; arbitrary mention text is unsafe."""
+
+    normalized = str(value or "").strip()
+    if not normalized:
+        return None
+    match = re.fullmatch(r"(?:([1-9][0-9]*)|<@&([1-9][0-9]*)>)", normalized)
+    if match is None:
+        raise ValueError(
+            "EVENT_REMINDER_MENTION must be blank, a positive role ID, or <@&ROLE_ID>."
+        )
+    return int(match.group(1) or match.group(2))
+
+
+def validate_event_reminder_role_scope(role_id, guild_ids):
+    """A Discord role snowflake is meaningful in exactly one guild."""
+
+    if role_id is not None and len(guild_ids) != 1:
+        raise ValueError(
+            "EVENT_REMINDER_MENTION requires exactly one ALLOWED_GUILD_ID. "
+            "Leave it blank for multi-guild deployments."
+        )
+    return role_id
 
 
 ALLOWED_GUILD_IDS = parse_allowed_guild_ids(
@@ -151,6 +177,13 @@ LAST_TRANSIENT_CLEANUP = {
 LAST_JELLYFIN_RECONCILIATION = {
     "completed_at": None,
     "failed": False,
+}
+LAST_EVENT_RECONCILIATION = {
+    "completed_at": None,
+    "failed": False,
+    "reminders": 0,
+    "native_events": 0,
+    "completed": 0,
 }
 SEMANTIC_RESOLVER_SEMAPHORE = asyncio.Semaphore(8)
 SEMANTIC_GENRE_CACHE_TTL_SECONDS = 60 * 60
@@ -183,6 +216,23 @@ REQUEST_UI_TIMEOUT = int(
         "REQUEST_UI_TIMEOUT",
         "300"
     )
+)
+
+EVENT_RECONCILE_SECONDS = max(
+    30,
+    int(os.environ.get("EVENT_RECONCILE_SECONDS", "60")),
+)
+EVENT_CYCLE_MAX_AGE_SECONDS = max(120, EVENT_RECONCILE_SECONDS * 3)
+EVENT_COMPLETION_GRACE_HOURS = max(
+    1,
+    int(os.environ.get("EVENT_COMPLETION_GRACE_HOURS", "6")),
+)
+EVENT_REMINDER_ROLE_ID = validate_event_reminder_role_scope(
+    parse_event_reminder_role_id(os.environ.get("EVENT_REMINDER_MENTION", "")),
+    ALLOWED_GUILD_IDS,
+)
+EVENT_REMINDER_MENTION = (
+    f"<@&{EVENT_REMINDER_ROLE_ID}>" if EVENT_REMINDER_ROLE_ID is not None else ""
 )
 
 SOULSYNC_PUBLIC_URL = os.environ.get(
@@ -1153,6 +1203,13 @@ def expired_interactive_success_embed(message, kind):
         return expired_saved_rating_embed(message)
     if kind == "event_vote_saved_actions":
         return expired_saved_event_vote_embed(message)
+    if kind == "event_time_vote_saved_actions":
+        embed = expired_saved_event_vote_embed(message)
+        if embed is not None:
+            embed.set_footer(
+                text="Availability saved - controls expired; run $event time to change it"
+            )
+        return embed
     return None
 
 
@@ -5994,6 +6051,7 @@ class EventCreateSpec:
 
 _EVENT_VOTE_LIMIT = re.compile(r"(?:^|\s)--votes\s+(\d+)\s*$", re.IGNORECASE)
 _event_dashboard_locks = {}
+_registered_event_dashboard_messages = set()
 
 
 def parse_event_create_input(value, *, now=None):
@@ -6141,6 +6199,86 @@ def build_event_line_embeds(*, title, description, field_name, lines):
     return tuple(embeds)
 
 
+def event_date_select_options(timezone_name, *, now=None, days=21):
+    """Return Discord-safe upcoming local dates without pretending it is a calendar."""
+
+    zone = ZoneInfo(str(timezone_name))
+    reference = now or datetime.now(zone)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=zone)
+    local_today = reference.astimezone(zone).date()
+    options = []
+    for offset in range(max(1, min(int(days), 25))):
+        value = local_today + timedelta(days=offset)
+        prefix = "Today" if offset == 0 else "Tomorrow" if offset == 1 else value.strftime("%A")
+        options.append(
+            discord.SelectOption(
+                label=f"{prefix} - {value.strftime('%b %d')}",
+                value=value.isoformat(),
+                description=value.strftime("%A, %B %d, %Y"),
+            )
+        )
+    return options
+
+
+def event_clock_select_options():
+    """Offer the common media-night window; Custom handles every other time."""
+
+    options = []
+    for minutes in range(12 * 60, 24 * 60, 30):
+        hour, minute = divmod(minutes, 60)
+        value = f"{hour:02d}:{minute:02d}"
+        label = datetime(2000, 1, 1, hour, minute).strftime("%I:%M %p").lstrip("0")
+        options.append(discord.SelectOption(label=label, value=value))
+    return options
+
+
+def event_local_datetime(date_value, time_value, timezone_name):
+    return parse_schedule_input(
+        f"{date_value} {time_value}",
+        timezone_name=timezone_name,
+    )[0]
+
+
+def validate_future_event_times(values, *, reference=None):
+    now = reference or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    normalized = tuple(values)
+    if any(value.astimezone(timezone.utc) <= now for value in normalized):
+        raise EventUsageError("Choose a date and time in the future.")
+    return normalized
+
+
+def current_visible_event(discord_guild_id, *, reference=None):
+    """Prefer an open event, then the nearest schedule that has not ended."""
+
+    current = events.current_event(int(discord_guild_id))
+    if current is not None:
+        return current
+    now = reference or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    scheduled = events.list_events(
+        discord_guild_id=int(discord_guild_id),
+        statuses=(EventStatus.SCHEDULED,),
+        limit=100,
+    )
+    candidates = []
+    for event_record in scheduled:
+        slot_times = [slot.starts_at for slot in events.slots(event_record.event_id)]
+        if not slot_times:
+            continue
+        if max(slot_times) + timedelta(hours=EVENT_COMPLETION_GRACE_HOURS) <= now:
+            continue
+        future = [value for value in slot_times if value >= now]
+        # Upcoming events win. Once one starts, keep it visible during the grace
+        # window until lifecycle rollover marks it complete.
+        sort_time = min(future) if future else max(slot_times)
+        candidates.append((0 if future else 1, sort_time, event_record))
+    return min(candidates, key=lambda value: (value[0], value[1]))[2] if candidates else None
+
+
 def build_event_dashboard_embed(event_record):
     color = {
         EventStatus.OPEN: discord.Color.blurple(),
@@ -6206,12 +6344,45 @@ def build_event_dashboard_embed(event_record):
             slot_lines.append(f"{timestamp} - **{title}**")
         add_event_line_fields(embed, "Schedule", slot_lines)
 
+    if event_record.status is EventStatus.OPEN and not event_record.preset_key:
+        all_time_options = events.ranked_time_options(event_record.event_id)
+        time_options = events.future_time_options(
+            event_record.event_id,
+            ranked=True,
+        )
+        if time_options:
+            time_lines = []
+            for index, option in enumerate(time_options[:10], start=1):
+                stamp = discord.utils.format_dt(option.starts_at, style="F")
+                relative = discord.utils.format_dt(option.starts_at, style="R")
+                time_lines.append(
+                    f"**{index}.** {stamp} ({relative}) - "
+                    f"{option.vote_count} available"
+                )
+            add_event_line_fields(
+                embed,
+                f"Time vote - top {min(len(time_options), 10)} of {len(time_options)}",
+                time_lines,
+            )
+        else:
+            embed.add_field(
+                name="Time vote",
+                value=(
+                    "No future candidate times remain. An administrator can use "
+                    "**Add times** below; expired vote history is retained."
+                    if all_time_options
+                    else "No candidate times yet. An administrator can use **Add times** below."
+                ),
+                inline=False,
+            )
+
     if event_record.status is EventStatus.OPEN:
         embed.add_field(
             name="Join in",
             value=(
                 "`$event nominate <title>` - add an exact title\n"
                 "`$event vote` - choose your favorites\n"
+                "`$event time` - propose or vote on times\n"
                 "`$event tonight` - see tonight's scheduled media"
             ),
             inline=False,
@@ -6235,7 +6406,12 @@ async def refresh_event_dashboard(event_id):
                 event_record.discord_channel_id,
                 event_record.dashboard_message_id,
             )
-            await message.edit(embed=build_event_dashboard_embed(event_record), view=None)
+            view = (
+                EventDashboardView(event_record)
+                if event_record.status in {EventStatus.OPEN, EventStatus.SCHEDULED}
+                else None
+            )
+            await message.edit(embed=build_event_dashboard_embed(event_record), view=view)
             return True
         except (discord.NotFound, discord.Forbidden) as exc:
             logger.info("Event dashboard unavailable event=%s: %s", event_id, exc)
@@ -6288,7 +6464,9 @@ class EventNominationSearchView(SearchResultsView):
 
     def build_embed(self):
         embed = super().build_embed()
-        embed.title = f'Nominate for {self.event_name}: "{self.query}"'
+        embed.title = compact_embed_title(
+            f'Nominate for {self.event_name}: "{self.query}"'
+        )
         embed.set_footer(
             text=(
                 f"Page {self.display_page + 1} - choose the exact title - "
@@ -6421,6 +6599,7 @@ class EventVoteView(LoggedView):
         rankings,
         selected_ids,
         command_message,
+        transient=True,
     ):
         super().__init__(timeout=REQUEST_UI_TIMEOUT)
         self.requester_id = int(requester_id)
@@ -6431,6 +6610,7 @@ class EventVoteView(LoggedView):
         self.rankings = list(rankings)
         self.selected_ids = set(int(value) for value in selected_ids)
         self.command_message = command_message
+        self.transient = bool(transient)
         self.message = None
         self.display_page = 0
         self.view_token = secrets.token_hex(6)
@@ -6468,13 +6648,26 @@ class EventVoteView(LoggedView):
         start = self.display_page * RESULTS_PER_PAGE
         return self.rankings[start:start + RESULTS_PER_PAGE]
 
-    def slot_custom_id(self, slot):
-        return f"mb:vote:{self.view_token}:{self.display_page}:{int(slot)}"
+    def slot_custom_id(self, slot, nomination_id=None):
+        if nomination_id is None:
+            items = self.page_items()
+            nomination_id = (
+                items[int(slot)].nomination.nomination_id
+                if 0 <= int(slot) < len(items)
+                else 0
+            )
+        return (
+            f"mb:vote:{self.view_token}:{self.display_page}:"
+            f"{int(slot)}:{int(nomination_id)}"
+        )
 
     def refresh_controls(self):
         items = self.page_items()
         for slot, button in enumerate(self.result_buttons):
-            button.custom_id = self.slot_custom_id(slot)
+            nomination_id = (
+                items[slot].nomination.nomination_id if slot < len(items) else 0
+            )
+            button.custom_id = self.slot_custom_id(slot, nomination_id)
             button.disabled = slot >= len(items)
             selected = (
                 slot < len(items)
@@ -6576,12 +6769,6 @@ class EventVoteView(LoggedView):
 
     async def toggle_slot(self, interaction, slot, *, clicked_id=None):
         async with self.action_lock:
-            if clicked_id and clicked_id != self.slot_custom_id(slot):
-                await interaction.response.send_message(
-                    "That ballot page changed before the click completed. Choose again.",
-                    ephemeral=True,
-                )
-                return
             items = self.page_items()
             if self.finished or slot >= len(items):
                 await interaction.response.send_message(
@@ -6589,6 +6776,12 @@ class EventVoteView(LoggedView):
                 )
                 return
             nomination_id = items[slot].nomination.nomination_id
+            if clicked_id and clicked_id != self.slot_custom_id(slot, nomination_id):
+                await interaction.response.send_message(
+                    "That ballot changed before the click completed. Choose again.",
+                    ephemeral=True,
+                )
+                return
             try:
                 result = events.toggle_vote(
                     event_id=self.event_id,
@@ -6617,7 +6810,9 @@ class EventVoteView(LoggedView):
             self.selected_ids = set(result.selected_nomination_ids)
             self.rankings = list(events.rankings(self.event_id))
             self.display_page = min(self.display_page, self.page_count - 1)
-            if not self.durable:
+            if not self.transient:
+                self.durable = True
+            elif not self.durable:
                 self.durable = transition_transient_message(
                     self.message or interaction.message,
                     "event_vote_saved_actions",
@@ -6642,6 +6837,11 @@ class EventVoteView(LoggedView):
             self.finished = True
             self.stop()
             if not self.saved:
+                if not self.transient:
+                    await interaction.response.edit_message(
+                        content="No title votes changed.", embed=None, view=None
+                    )
+                    return
                 await interaction.response.defer()
                 await cleanup_unsuccessful_request(
                     origin_message=self.message or interaction.message,
@@ -6659,6 +6859,15 @@ class EventVoteView(LoggedView):
                 return
             self.finished = True
             self.stop()
+            if not self.transient:
+                try:
+                    if self.message is not None:
+                        await self.message.edit(
+                            embed=self.build_embed(expired=self.saved), view=None
+                        )
+                except Exception as exc:
+                    logger.info("Could not retire private event vote controls: %s", exc)
+                return
             if self.saved:
                 mark_transient_message_terminal(self.message, "kept")
                 try:
@@ -6670,6 +6879,797 @@ class EventVoteView(LoggedView):
                 origin_message=self.message,
                 command_message=self.command_message,
             )
+
+
+def event_time_option_label(option, timezone_name):
+    local = option.starts_at.astimezone(ZoneInfo(timezone_name))
+    return local.strftime("%a %b %d at %I:%M %p").replace(" 0", " ")
+
+
+def build_event_time_picker_embed(event_record, selected_at=None):
+    embed = discord.Embed(
+        title=compact_embed_title(f"Add times: {event_record.name}"),
+        description=(
+            "Choose a date and time, then click **Add candidate**. Add every time "
+            "that could work; everyone can vote for all the times they are available."
+        ),
+        color=discord.Color.blurple(),
+    )
+    if selected_at is not None:
+        embed.add_field(
+            name="Ready to add",
+            value=(
+                f"{discord.utils.format_dt(selected_at, style='F')} "
+                f"({discord.utils.format_dt(selected_at, style='R')})"
+            ),
+            inline=False,
+        )
+    all_options = events.time_options(event_record.event_id)
+    options = events.future_time_options(event_record.event_id)
+    if options:
+        lines = [
+            (
+                f"{discord.utils.format_dt(option.starts_at, style='F')} - "
+                f"{option.vote_count} available"
+            )
+            for option in options
+        ]
+        add_event_line_fields(embed, "Candidate times", lines)
+    else:
+        embed.add_field(
+            name="Candidate times",
+            value=(
+                "No future times remain. Expired candidates and their votes are kept in history."
+                if all_options
+                else "None yet."
+            ),
+            inline=False,
+        )
+    embed.set_footer(
+        text="Times are shown in each reader's Discord timezone; Custom accepts Denver local time"
+    )
+    return embed
+
+
+class EventCustomTimeModal(discord.ui.Modal):
+    def __init__(self, parent):
+        super().__init__(title="Add a custom event time", timeout=REQUEST_UI_TIMEOUT)
+        self.parent_view = parent
+        self.local_value = discord.ui.TextInput(
+            label="Local date and time",
+            placeholder="2026-09-12 19:30",
+            min_length=16,
+            max_length=16,
+        )
+        self.add_item(self.local_value)
+
+    async def on_submit(self, interaction):
+        parent = self.parent_view
+        try:
+            starts_at = parse_schedule_input(
+                str(self.local_value.value),
+                timezone_name=parent.timezone_name,
+            )[0]
+            validate_future_event_times((starts_at,))
+            events.add_time_options(
+                parent.event_id,
+                (starts_at,),
+                parent.requester_id,
+            )
+        except (EventUsageError, EventStateError, EventNotFoundError) as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+        except Exception as exc:
+            error_id = log_exception("Could not add custom event time", exc)
+            await interaction.response.send_message(
+                f"Couldn't add that time. Error ID: `{error_id}`", ephemeral=True
+            )
+            return
+        parent.saved = True
+        parent.selected_at = starts_at
+        await interaction.response.send_message(
+            f"Added {discord.utils.format_dt(starts_at, style='F')}.", ephemeral=True
+        )
+        await refresh_event_dashboard(parent.event_id)
+        if parent.message is not None:
+            try:
+                await parent.message.edit(
+                    embed=build_event_time_picker_embed(
+                        events.event(parent.event_id), starts_at
+                    ),
+                    view=parent,
+                )
+            except Exception as exc:
+                logger.info("Could not refresh event time picker after modal: %s", exc)
+
+
+class EventTimePickerView(LoggedView):
+    def __init__(self, *, requester_id, guild_id, event_record, command_message=None):
+        super().__init__(timeout=REQUEST_UI_TIMEOUT)
+        self.requester_id = int(requester_id)
+        self.guild_id = int(guild_id)
+        self.event_id = int(event_record.event_id)
+        self.timezone_name = event_record.timezone_name
+        self.command_message = command_message
+        self.message = None
+        self.saved = False
+        self.finished = False
+        local_now = datetime.now(ZoneInfo(self.timezone_name))
+        date_options = event_date_select_options(self.timezone_name, now=local_now)
+        default_date_index = 1 if local_now.hour >= 19 and len(date_options) > 1 else 0
+        self.selected_date = date_options[default_date_index].value
+        self.selected_time = "19:00"
+        self.selected_at = event_local_datetime(
+            self.selected_date, self.selected_time, self.timezone_name
+        )
+
+        date_options[default_date_index].default = True
+        clock_options = event_clock_select_options()
+        for option in clock_options:
+            option.default = option.value == self.selected_time
+        self.date_select = discord.ui.Select(
+            placeholder="Choose a date",
+            options=date_options,
+            min_values=1,
+            max_values=1,
+            row=0,
+        )
+        self.time_select = discord.ui.Select(
+            placeholder="Choose a time",
+            options=clock_options,
+            min_values=1,
+            max_values=1,
+            row=1,
+        )
+        self.date_select.callback = self.choose_date
+        self.time_select.callback = self.choose_time
+        self.add_item(self.date_select)
+        self.add_item(self.time_select)
+
+        add_button = discord.ui.Button(
+            label="Add candidate", style=discord.ButtonStyle.success, row=2
+        )
+        custom_button = discord.ui.Button(
+            label="Custom", style=discord.ButtonStyle.secondary, row=2
+        )
+        done_button = discord.ui.Button(
+            label="Done", style=discord.ButtonStyle.primary, row=2
+        )
+        reset_button = discord.ui.Button(
+            label="Reset times", style=discord.ButtonStyle.danger, row=2
+        )
+        add_button.callback = self.add_candidate
+        custom_button.callback = self.custom_time
+        done_button.callback = self.done
+        reset_button.callback = self.reset_times
+        self.add_item(add_button)
+        self.add_item(custom_button)
+        self.add_item(done_button)
+        self.add_item(reset_button)
+        self.refresh_select_defaults()
+
+    def refresh_select_defaults(self):
+        for option in self.date_select.options:
+            option.default = option.value == self.selected_date
+        for option in self.time_select.options:
+            option.default = option.value == self.selected_time
+
+    def build_embed(self):
+        return build_event_time_picker_embed(
+            events.event(self.event_id), self.selected_at
+        )
+
+    async def interaction_check(self, interaction):
+        if interaction.guild_id != self.guild_id or interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "Only the administrator who opened this picker can change it.",
+                ephemeral=True,
+            )
+            return False
+        permissions = getattr(interaction.user, "guild_permissions", None)
+        if not getattr(permissions, "administrator", False):
+            await interaction.response.send_message(
+                "An administrator must propose event times.", ephemeral=True
+            )
+            return False
+        return await renew_transient_interaction(
+            interaction, self.message or getattr(interaction, "message", None)
+        )
+
+    async def choose_date(self, interaction):
+        self.selected_date = self.date_select.values[0]
+        self.selected_at = event_local_datetime(
+            self.selected_date, self.selected_time, self.timezone_name
+        )
+        self.refresh_select_defaults()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    async def choose_time(self, interaction):
+        self.selected_time = self.time_select.values[0]
+        self.selected_at = event_local_datetime(
+            self.selected_date, self.selected_time, self.timezone_name
+        )
+        self.refresh_select_defaults()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    async def add_candidate(self, interaction):
+        try:
+            validate_future_event_times((self.selected_at,))
+            events.add_time_options(
+                self.event_id,
+                (self.selected_at,),
+                self.requester_id,
+            )
+        except (EventUsageError, EventStateError, EventNotFoundError) as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+        self.saved = True
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+        await refresh_event_dashboard(self.event_id)
+
+    async def reset_times(self, interaction):
+        try:
+            events.replace_time_options(self.event_id, (), self.requester_id)
+        except (EventUsageError, EventStateError, EventNotFoundError) as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+        self.saved = True
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+        await refresh_event_dashboard(self.event_id)
+
+    async def custom_time(self, interaction):
+        await interaction.response.send_modal(EventCustomTimeModal(self))
+
+    async def done(self, interaction):
+        self.finished = True
+        self.stop()
+        await interaction.response.defer()
+        if self.command_message is not None:
+            await cleanup_unsuccessful_request(
+                origin_message=self.message or interaction.message,
+                command_message=self.command_message,
+            )
+        else:
+            await interaction.edit_original_response(
+                content="Candidate times saved." if self.saved else "No times changed.",
+                embed=None,
+                view=None,
+            )
+
+    async def on_timeout(self):
+        if self.finished:
+            return
+        self.finished = True
+        self.stop()
+        if self.command_message is not None:
+            await cleanup_unsuccessful_request(
+                origin_message=self.message,
+                command_message=self.command_message,
+            )
+        elif self.message is not None:
+            try:
+                await self.message.edit(view=None)
+            except Exception as exc:
+                logger.info("Could not retire event time picker: %s", exc)
+
+
+class EventRescheduleCustomTimeModal(discord.ui.Modal):
+    def __init__(self, parent):
+        super().__init__(title="Choose a custom event time", timeout=REQUEST_UI_TIMEOUT)
+        self.parent_view = parent
+        self.local_value = discord.ui.TextInput(
+            label="Local date and time",
+            placeholder="2026-09-12 19:30",
+            min_length=16,
+            max_length=16,
+        )
+        self.add_item(self.local_value)
+
+    async def on_submit(self, interaction):
+        parent = self.parent_view
+        try:
+            starts_at = parse_schedule_input(
+                str(self.local_value.value),
+                timezone_name=parent.timezone_name,
+            )[0]
+            validate_future_event_times((starts_at,))
+            event_record, slots = parent.reschedule_to(starts_at)
+        except StaleEventRevisionError as exc:
+            parent.finished = True
+            parent.stop()
+            await interaction.response.edit_message(
+                content=f"{exc} Run `$event reschedule {parent.event_id}` again.",
+                embed=None,
+                view=None,
+            )
+            return
+        except (EventUsageError, EventStateError, EventNotFoundError) as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+        except Exception as exc:
+            error_id = log_exception("Could not save custom event reschedule", exc)
+            await interaction.response.send_message(
+                f"Couldn't reschedule that event. Error ID: `{error_id}`", ephemeral=True
+            )
+            return
+        await parent.finish_reschedule(interaction, event_record, slots)
+
+
+class EventReschedulePickerView(EventTimePickerView):
+    def __init__(self, *, requester_id, guild_id, event_record, slot, command_message):
+        super().__init__(
+            requester_id=requester_id,
+            guild_id=guild_id,
+            event_record=event_record,
+            command_message=command_message,
+        )
+        self.slot = slot
+        self.event_revision = int(event_record.revision)
+        local = slot.starts_at.astimezone(ZoneInfo(self.timezone_name))
+        self.selected_date = local.date().isoformat()
+        self.selected_time = local.strftime("%H:%M")
+        self.selected_at = local
+        if not any(
+            option.value == self.selected_date for option in self.date_select.options
+        ):
+            self.date_select.append_option(
+                discord.SelectOption(
+                    label=f"Current - {local.strftime('%b %d')}",
+                    value=self.selected_date,
+                    description=local.strftime("%A, %B %d, %Y"),
+                )
+            )
+        if not any(
+            option.value == self.selected_time for option in self.time_select.options
+        ):
+            self.time_select.append_option(
+                discord.SelectOption(
+                    label=local.strftime("%I:%M %p").lstrip("0"),
+                    value=self.selected_time,
+                )
+            )
+        self.refresh_select_defaults()
+        for child in tuple(self.children):
+            if getattr(child, "label", None) == "Add candidate":
+                child.label = "Save new time"
+            elif getattr(child, "label", None) == "Done":
+                child.label = "Cancel"
+            elif getattr(child, "label", None) == "Reset times":
+                self.remove_item(child)
+
+    def build_embed(self):
+        embed = discord.Embed(
+            title=compact_embed_title(f"Reschedule: {events.event(self.event_id).name}"),
+            description=(
+                "Choose the new date and time. The title votes and winning title stay "
+                "intact, and the existing Discord event will be moved instead of duplicated."
+            ),
+            color=discord.Color.gold(),
+        )
+        embed.add_field(
+            name="Current",
+            value=discord.utils.format_dt(self.slot.starts_at, style="F"),
+            inline=False,
+        )
+        embed.add_field(
+            name="New",
+            value=(
+                f"{discord.utils.format_dt(self.selected_at, style='F')} "
+                f"({discord.utils.format_dt(self.selected_at, style='R')})"
+            ),
+            inline=False,
+        )
+        return embed
+
+    def reschedule_to(self, starts_at):
+        return events.reschedule_event(
+            self.event_id,
+            (ScheduleAssignment(starts_at, self.slot.nomination_id),),
+            expected_revision=self.event_revision,
+        )
+
+    async def finish_reschedule(self, interaction, event_record, slots):
+        self.saved = True
+        self.finished = True
+        self.stop()
+        mark_transient_message_terminal(self.message or interaction.message, "accepted")
+        await interaction.response.edit_message(
+            embed=build_event_schedule_receipt(event_record, slots), view=None
+        )
+        await refresh_event_dashboard(self.event_id)
+
+    async def add_candidate(self, interaction):
+        try:
+            validate_future_event_times((self.selected_at,))
+            event_record, slots = self.reschedule_to(self.selected_at)
+        except StaleEventRevisionError as exc:
+            self.finished = True
+            self.stop()
+            await interaction.response.edit_message(
+                content=f"{exc} Run `$event reschedule {self.event_id}` again.",
+                embed=None,
+                view=None,
+            )
+            return
+        except (EventUsageError, EventStateError, EventNotFoundError) as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+        await self.finish_reschedule(interaction, event_record, slots)
+
+    async def custom_time(self, interaction):
+        await interaction.response.send_modal(EventRescheduleCustomTimeModal(self))
+
+    async def done(self, interaction):
+        self.finished = True
+        self.stop()
+        await interaction.response.defer()
+        await cleanup_unsuccessful_request(
+            origin_message=self.message or interaction.message,
+            command_message=self.command_message,
+        )
+
+
+class EventTimeVoteSelect(discord.ui.Select):
+    def __init__(self, parent, options):
+        rendered = []
+        for option in options:
+            rendered.append(
+                discord.SelectOption(
+                    label=event_time_option_label(option, parent.timezone_name)[:100],
+                    value=str(option.time_option_id),
+                    description=(
+                        f"{option.vote_count} member{'s' if option.vote_count != 1 else ''} available"
+                    )[:100],
+                    default=option.time_option_id in parent.selected_ids,
+                )
+            )
+        super().__init__(
+            placeholder="Select every time you can attend",
+            options=rendered,
+            min_values=0,
+            max_values=len(rendered),
+            row=0,
+        )
+
+    async def callback(self, interaction):
+        await self.view.save_values(interaction, self.values)
+
+
+class EventTimeVoteView(LoggedView):
+    def __init__(
+        self,
+        *,
+        requester_id,
+        guild_id,
+        event_record,
+        options,
+        selected_ids,
+        command_message=None,
+    ):
+        super().__init__(timeout=REQUEST_UI_TIMEOUT)
+        self.requester_id = int(requester_id)
+        self.guild_id = int(guild_id)
+        self.event_id = int(event_record.event_id)
+        self.event_name = event_record.name
+        self.timezone_name = event_record.timezone_name
+        self.options = list(options)
+        option_ids = {option.time_option_id for option in self.options}
+        self.selected_ids = {
+            int(value) for value in selected_ids if int(value) in option_ids
+        }
+        self.command_message = command_message
+        self.message = None
+        self.saved = False
+        self.finished = False
+        self.durable = False
+        self.add_item(EventTimeVoteSelect(self, self.options))
+        clear_button = discord.ui.Button(
+            label="None work", style=discord.ButtonStyle.danger, row=1
+        )
+        done_button = discord.ui.Button(
+            label="Done", style=discord.ButtonStyle.success, row=1
+        )
+        clear_button.callback = self.clear
+        done_button.callback = self.done
+        self.add_item(clear_button)
+        self.add_item(done_button)
+
+    def build_embed(self, *, expired=False):
+        lines = []
+        for option in self.options:
+            selected = option.time_option_id in self.selected_ids
+            lines.append(
+                f"{'**Available** - ' if selected else ''}"
+                f"{discord.utils.format_dt(option.starts_at, style='F')} "
+                f"({discord.utils.format_dt(option.starts_at, style='R')}) - "
+                f"{option.vote_count} vote{'s' if option.vote_count != 1 else ''}"
+            )
+        embed = discord.Embed(
+            title=compact_embed_title(f"When can you make {self.event_name}?"),
+            description="Select every time that works for you. This is availability, not a one-choice ballot.",
+            color=discord.Color.green() if self.saved else discord.Color.blurple(),
+        )
+        add_event_line_fields(embed, "Candidate times", lines)
+        embed.set_footer(
+            text=(
+                "Availability saved - run $event time to change it"
+                if expired
+                else f"{len(self.selected_ids)} selected - controls expire after {REQUEST_UI_TIMEOUT // 60} minutes"
+            )
+        )
+        return embed
+
+    async def interaction_check(self, interaction):
+        if interaction.guild_id != self.guild_id or interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "This availability card belongs to someone else. Use `$event time` for your own.",
+                ephemeral=True,
+            )
+            return False
+        return await renew_transient_interaction(
+            interaction, self.message or getattr(interaction, "message", None)
+        )
+
+    async def save_values(self, interaction, values):
+        try:
+            result = events.replace_time_votes(
+                self.event_id,
+                self.requester_id,
+                tuple(int(value) for value in values),
+            )
+        except (EventUsageError, EventStateError, EventNotFoundError) as exc:
+            self.finished = True
+            self.stop()
+            await interaction.response.edit_message(content=str(exc), embed=None, view=None)
+            return
+        self.saved = True
+        self.selected_ids = set(result.selected_time_option_ids)
+        self.options = list(events.future_time_options(self.event_id))
+        option_ids = {option.time_option_id for option in self.options}
+        self.selected_ids.intersection_update(option_ids)
+        if not self.options:
+            self.finished = True
+            self.stop()
+            await interaction.response.edit_message(
+                content=(
+                    "The candidate times changed while this card was open. "
+                    "Run `$event time` again."
+                ),
+                embed=None,
+                view=None,
+            )
+            await refresh_event_dashboard(self.event_id)
+            return
+        if self.command_message is None:
+            self.durable = True
+        elif not self.durable:
+            self.durable = transition_transient_message(
+                self.message or interaction.message,
+                "event_time_vote_saved_actions",
+            )
+            if not self.durable:
+                self.finished = True
+                self.stop()
+                mark_transient_message_terminal(
+                    self.message or interaction.message,
+                    "kept",
+                )
+        else:
+            touch_transient_message(self.message or interaction.message)
+        self.clear_items()
+        self.add_item(EventTimeVoteSelect(self, self.options))
+        clear_button = discord.ui.Button(label="None work", style=discord.ButtonStyle.danger, row=1)
+        done_button = discord.ui.Button(label="Done", style=discord.ButtonStyle.success, row=1)
+        clear_button.callback = self.clear
+        done_button.callback = self.done
+        self.add_item(clear_button)
+        self.add_item(done_button)
+        await interaction.response.edit_message(
+            embed=self.build_embed(expired=not self.durable),
+            view=self if self.durable else None,
+        )
+        await refresh_event_dashboard(self.event_id)
+
+    async def clear(self, interaction):
+        await self.save_values(interaction, ())
+
+    async def done(self, interaction):
+        self.finished = True
+        self.stop()
+        if self.saved:
+            mark_transient_message_terminal(self.message or interaction.message, "kept")
+            await interaction.response.edit_message(
+                embed=self.build_embed(expired=True), view=None
+            )
+        elif self.command_message is not None:
+            await interaction.response.defer()
+            await cleanup_unsuccessful_request(
+                origin_message=self.message or interaction.message,
+                command_message=self.command_message,
+            )
+        else:
+            await interaction.response.edit_message(
+                content="No availability changed.", embed=None, view=None
+            )
+
+    async def on_timeout(self):
+        if self.finished:
+            return
+        self.finished = True
+        self.stop()
+        if self.saved:
+            mark_transient_message_terminal(self.message, "kept")
+            if self.message is not None:
+                try:
+                    await self.message.edit(embed=self.build_embed(expired=True), view=None)
+                except Exception as exc:
+                    logger.info("Could not retire event time vote controls: %s", exc)
+        elif self.command_message is not None:
+            await cleanup_unsuccessful_request(
+                origin_message=self.message,
+                command_message=self.command_message,
+            )
+        elif self.message is not None:
+            try:
+                await self.message.edit(view=None)
+            except Exception as exc:
+                logger.info("Could not retire private time vote controls: %s", exc)
+
+
+class EventDashboardView(LoggedView):
+    """Restart-safe controls attached to the durable dashboard message."""
+
+    def __init__(self, event_record, *, persistent=True, command_message=None):
+        super().__init__(timeout=None if persistent else REQUEST_UI_TIMEOUT)
+        self.persistent = bool(persistent)
+        self.command_message = command_message
+        self.message = None
+        self.event_id = int(event_record.event_id)
+        self.guild_id = int(event_record.discord_guild_id)
+        if event_record.status is EventStatus.OPEN:
+            title_vote = discord.ui.Button(
+                label="Vote titles",
+                style=discord.ButtonStyle.primary,
+                custom_id=f"mb:event:{self.event_id}:titles",
+            )
+            time_vote = discord.ui.Button(
+                label="Vote times",
+                style=discord.ButtonStyle.primary,
+                custom_id=f"mb:event:{self.event_id}:times",
+            )
+            add_times = discord.ui.Button(
+                label="Add times",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"mb:event:{self.event_id}:add-times",
+            )
+            title_vote.callback = self.vote_titles
+            time_vote.callback = self.vote_times
+            add_times.callback = self.add_times
+            self.add_item(title_vote)
+            self.add_item(time_vote)
+            if not event_record.preset_key:
+                self.add_item(add_times)
+        if event_record.status is EventStatus.SCHEDULED:
+            manage = discord.ui.Button(
+                label="Manage",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"mb:event:{self.event_id}:manage",
+            )
+            manage.callback = self.manage
+            self.add_item(manage)
+
+    async def interaction_check(self, interaction):
+        if interaction.guild_id != self.guild_id:
+            await interaction.response.send_message(
+                "That event belongs to another server.", ephemeral=True
+            )
+            return False
+        if self.persistent:
+            return True
+        return await renew_transient_interaction(
+            interaction,
+            self.message or getattr(interaction, "message", None),
+        )
+
+    async def on_timeout(self):
+        if self.persistent:
+            return
+        await cleanup_unsuccessful_request(
+            origin_message=self.message,
+            command_message=self.command_message,
+        )
+
+    async def vote_titles(self, interaction):
+        event_record = events.event(self.event_id, discord_guild_id=self.guild_id)
+        rankings = events.rankings(self.event_id)
+        if not rankings:
+            await interaction.response.send_message(
+                "Nothing has been nominated yet. Use `$event nominate <title>`.",
+                ephemeral=True,
+            )
+            return
+        selected = events.user_vote_ids(
+            event_id=self.event_id, discord_user_id=interaction.user.id
+        )
+        view = EventVoteView(
+            requester_id=interaction.user.id,
+            guild_id=self.guild_id,
+            event_record=event_record,
+            rankings=rankings,
+            selected_ids=selected,
+            command_message=None,
+            transient=False,
+        )
+        await interaction.response.send_message(
+            embed=view.build_embed(), view=view, ephemeral=True
+        )
+        view.message = await interaction.original_response()
+
+    async def vote_times(self, interaction):
+        event_record = events.event(self.event_id, discord_guild_id=self.guild_id)
+        options = events.future_time_options(self.event_id)
+        if not options:
+            await interaction.response.send_message(
+                "No future candidate times remain. Ask an administrator to use **Add times**.",
+                ephemeral=True,
+            )
+            return
+        selected = events.user_time_vote_ids(
+            self.event_id, interaction.user.id
+        )
+        view = EventTimeVoteView(
+            requester_id=interaction.user.id,
+            guild_id=self.guild_id,
+            event_record=event_record,
+            options=options,
+            selected_ids=selected,
+        )
+        await interaction.response.send_message(
+            embed=view.build_embed(), view=view, ephemeral=True
+        )
+        view.message = await interaction.original_response()
+
+    async def add_times(self, interaction):
+        permissions = getattr(interaction.user, "guild_permissions", None)
+        if not getattr(permissions, "administrator", False):
+            await interaction.response.send_message(
+                "An administrator must propose candidate times.", ephemeral=True
+            )
+            return
+        event_record = events.event(self.event_id, discord_guild_id=self.guild_id)
+        view = EventTimePickerView(
+            requester_id=interaction.user.id,
+            guild_id=self.guild_id,
+            event_record=event_record,
+        )
+        await interaction.response.send_message(
+            embed=view.build_embed(), view=view, ephemeral=True
+        )
+        view.message = await interaction.original_response()
+
+    async def manage(self, interaction):
+        permissions = getattr(interaction.user, "guild_permissions", None)
+        if not getattr(permissions, "administrator", False):
+            await interaction.response.send_message(
+                "An administrator must manage a scheduled event.", ephemeral=True
+            )
+            return
+        event_record = events.event(self.event_id, discord_guild_id=self.guild_id)
+        slots = events.slots(self.event_id)
+        lines = [
+            f"{discord.utils.format_dt(slot.starts_at, style='F')} - **{slot.title or 'TBD'}**"
+            for slot in slots
+        ]
+        embed = discord.Embed(
+            title=compact_embed_title(f"Manage: {event_record.name}"),
+            description=(
+                "The schedule is editable. Use `$event reschedule #` to move it, "
+                "`$event reopen #` to resume voting, or complete/cancel it below."
+            ),
+            color=discord.Color.blurple(),
+        )
+        add_event_line_fields(embed, "Current schedule", lines)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 def schedule_assignment_lines(plan):
@@ -6694,8 +7694,9 @@ def build_event_schedule_preview(event_record, plan):
     embed = discord.Embed(
         title=f"Schedule {event_record.name}?",
         description=(
-            "This ranking becomes permanent and closes nominations and voting. "
-            "Nothing will be requested automatically."
+            "This publishes the current winners and closes nominations and voting. "
+            "The schedule can still be moved or reopened later. Nothing will be "
+            "requested automatically."
         ),
         color=discord.Color.gold(),
     )
@@ -6717,7 +7718,10 @@ def build_event_schedule_preview(event_record, plan):
 def build_event_schedule_receipt(event_record, slots):
     embed = discord.Embed(
         title=f"Scheduled: {event_record.name}",
-        description="Voting is frozen. No media was requested automatically.",
+        description=(
+            "Voting is closed for now. MediaBot will publish Discord events and "
+            "send reminders; administrators can still reschedule or reopen voting."
+        ),
         color=discord.Color.green(),
     )
     lines = []
@@ -6728,6 +7732,554 @@ def build_event_schedule_receipt(event_record, slots):
     add_event_line_fields(embed, "Schedule", lines)
     embed.set_footer(text=f"Event #{event_record.event_id}")
     return embed
+
+
+_NATIVE_EVENT_MARKER_RE = re.compile(
+    r"(?<![0-9A-Za-z])\[mediabot:event=([1-9][0-9]*);"
+    r"slot=([1-9][0-9]*)\](?![0-9A-Za-z])"
+)
+_LEGACY_NATIVE_EVENT_MARKER_RE = re.compile(
+    r"MediaBot event #([1-9][0-9]*) / slot #([1-9][0-9]*)(?=[.\s]|$)"
+)
+
+
+class EventNativeSyncError(RuntimeError):
+    """Native Discord event publication cannot currently make progress."""
+
+
+def native_event_marker(event_id, slot_id):
+    return f"[mediabot:event={int(event_id)};slot={int(slot_id)}]"
+
+
+def native_event_marker_ids(description):
+    text = str(description or "")
+    matches = {
+        (int(match.group(1)), int(match.group(2)))
+        for pattern in (_NATIVE_EVENT_MARKER_RE, _LEGACY_NATIVE_EVENT_MARKER_RE)
+        for match in pattern.finditer(text)
+    }
+    return matches
+
+
+def native_event_is_bot_owned(remote, guild):
+    bot_member_id = getattr(getattr(guild, "me", None), "id", None)
+    if bot_member_id is None:
+        bot_member_id = getattr(getattr(bot, "user", None), "id", None)
+    creator_id = getattr(remote, "creator_id", None)
+    return (
+        bot_member_id is not None
+        and creator_id is not None
+        and int(creator_id) == int(bot_member_id)
+    )
+
+
+def native_event_location():
+    configured = str(jellyfin.public_url or "").strip()
+    if configured and len(configured) <= 100:
+        return configured
+    return "Jellyfin" if configured else "Discord"
+
+
+def native_event_datetime_matches(actual, expected):
+    if actual is None:
+        return False
+    if actual.tzinfo is None:
+        actual = actual.replace(tzinfo=timezone.utc)
+    return abs((actual.astimezone(timezone.utc) - expected.astimezone(timezone.utc)).total_seconds()) <= 1
+
+
+def native_event_description(event_record, slot):
+    marker = native_event_marker(event_record.event_id, slot.slot_id)
+    title = event_display_title(slot.title or "Media night", slot.year)
+    return (
+        f"{title}\n\nPlanned by Dogginator MediaBot. {marker}. "
+        "The MediaBot schedule remains authoritative."
+    )
+
+
+def current_native_event_slot(expected_event, expected_slot):
+    """Return a fresh matching scheduled slot, or None after any local change."""
+
+    try:
+        current_event = events.event(expected_event.event_id)
+        current_slot = next(
+            (
+                value
+                for value in events.slots(expected_event.event_id)
+                if int(value.slot_id) == int(expected_slot.slot_id)
+            ),
+            None,
+        )
+    except (EventNotFoundError, EventStateError):
+        return None
+    if current_slot is None or current_event.status is not EventStatus.SCHEDULED:
+        return None
+    if current_slot.slot_status != "planned":
+        return None
+    expected_identity = (
+        int(expected_event.revision),
+        int(expected_slot.event_id),
+        expected_slot.starts_at,
+        expected_slot.nomination_id,
+        expected_slot.media_type,
+        expected_slot.tmdb_id,
+        expected_slot.title,
+        expected_slot.year,
+        expected_slot.native_scheduled_event_id,
+    )
+    current_identity = (
+        int(current_event.revision),
+        int(current_slot.event_id),
+        current_slot.starts_at,
+        current_slot.nomination_id,
+        current_slot.media_type,
+        current_slot.tmdb_id,
+        current_slot.title,
+        current_slot.year,
+        current_slot.native_scheduled_event_id,
+    )
+    return (current_event, current_slot) if current_identity == expected_identity else None
+
+
+async def discard_stale_native_event(remote, guild, remote_events, marker):
+    """Compensate an external mutation that lost its local identity race."""
+
+    if remote is None:
+        return
+    if not native_event_is_bot_owned(remote, guild):
+        raise EventNativeSyncError(
+            f"Refusing to delete a non-MediaBot Discord event after stale sync {marker}."
+        )
+    try:
+        await remote.delete(reason=f"{marker} discarded after local schedule changed")
+    except discord.NotFound:
+        pass
+    except (discord.Forbidden, discord.HTTPException) as exc:
+        raise EventNativeSyncError(
+            f"Could not discard stale Discord event {remote.id}: {exc}"
+        ) from exc
+    if remote_events is not None:
+        remote_events[:] = [
+            value for value in remote_events if int(value.id) != int(remote.id)
+        ]
+
+
+async def sync_native_event_slot(event_record, slot, *, remote_events=None):
+    """Idempotently create or edit one Discord Scheduled Event for one slot."""
+
+    guild = bot.get_guild(int(event_record.discord_guild_id))
+    if slot.starts_at <= datetime.now(timezone.utc):
+        return False
+    if guild is None:
+        raise EventNativeSyncError(
+            f"Discord guild {event_record.discord_guild_id} is not available."
+        )
+    me = getattr(guild, "me", None)
+    permissions = getattr(me, "guild_permissions", None)
+    if not (
+        getattr(permissions, "manage_events", False)
+        or getattr(permissions, "create_events", False)
+        or getattr(permissions, "administrator", False)
+    ):
+        raise EventNativeSyncError(
+            "MediaBot needs Create Events or Manage Events to publish the schedule."
+        )
+
+    current = current_native_event_slot(event_record, slot)
+    if current is None:
+        return False
+    event_record, slot = current
+
+    known = (
+        remote_events
+        if remote_events is not None
+        else list(await guild.fetch_scheduled_events(with_counts=False))
+    )
+    current = current_native_event_slot(event_record, slot)
+    if current is None:
+        return False
+    event_record, slot = current
+    remote = next(
+        (
+            candidate
+            for candidate in known
+            if slot.native_scheduled_event_id
+            and int(candidate.id) == int(slot.native_scheduled_event_id)
+        ),
+        None,
+    )
+    marker = native_event_marker(event_record.event_id, slot.slot_id)
+    if remote is None:
+        remote = next(
+            (
+                candidate
+                for candidate in known
+                if native_event_is_bot_owned(candidate, guild)
+                and (event_record.event_id, slot.slot_id)
+                in native_event_marker_ids(getattr(candidate, "description", ""))
+            ),
+            None,
+        )
+
+    title = compact_embed_title(
+        f"{event_record.name}: {event_display_title(slot.title or 'Media night', slot.year)}",
+        limit=100,
+    )
+    description = native_event_description(event_record, slot)
+    end_time = slot.starts_at + timedelta(hours=4)
+    location = native_event_location()
+    changed = False
+    remote_status = getattr(remote, "status", None) if remote is not None else None
+    if remote is not None and remote_status not in (None, discord.EventStatus.scheduled):
+        await remote.delete(reason=f"{marker} replaced after an invalid status transition")
+        known[:] = [value for value in known if int(value.id) != int(remote.id)]
+        remote = None
+        current = current_native_event_slot(event_record, slot)
+        if current is None:
+            return False
+        event_record, slot = current
+    if remote is None:
+        remote = await guild.create_scheduled_event(
+            name=title,
+            start_time=slot.starts_at,
+            end_time=end_time,
+            entity_type=discord.EntityType.external,
+            privacy_level=discord.PrivacyLevel.guild_only,
+            location=location,
+            description=description,
+            reason=marker,
+        )
+        if remote_events is not None and not any(
+            int(candidate.id) == int(remote.id) for candidate in remote_events
+        ):
+            remote_events.append(remote)
+        changed = True
+    else:
+        remote_start = getattr(remote, "start_time", None)
+        remote_end = getattr(remote, "end_time", None)
+        remote_entity_type = getattr(remote, "entity_type", None)
+        if (
+            remote.name != title
+            or not native_event_datetime_matches(remote_start, slot.starts_at)
+            or not native_event_datetime_matches(remote_end, end_time)
+            or str(getattr(remote, "description", "") or "") != description
+            or str(getattr(remote, "location", "") or "") != location
+            or remote_entity_type not in (None, discord.EntityType.external)
+        ):
+            remote = await remote.edit(
+                name=title,
+                description=description,
+                start_time=slot.starts_at,
+                end_time=end_time,
+                entity_type=discord.EntityType.external,
+                location=location,
+                reason=marker,
+            )
+            changed = True
+    current = current_native_event_slot(event_record, slot)
+    if current is None:
+        await discard_stale_native_event(remote, guild, known, marker)
+        return False
+    current_event, current_slot = current
+    if int(current_slot.native_scheduled_event_id or 0) != int(remote.id):
+        try:
+            events.set_native_scheduled_event_id(
+                current_slot.slot_id,
+                int(remote.id),
+                expected_event=current_event,
+                expected_slot=current_slot,
+            )
+        except (
+            EventNotFoundError,
+            EventStateError,
+            StaleEventRevisionError,
+        ):
+            await discard_stale_native_event(remote, guild, known, marker)
+            return False
+        changed = True
+    return changed
+
+
+async def remove_native_events(
+    event_record,
+    *,
+    remote_events=None,
+    expected_slot_ids=None,
+    expected_native_event_ids=None,
+):
+    guild = bot.get_guild(int(event_record.discord_guild_id))
+    if guild is None:
+        return 0
+    if remote_events is None:
+        try:
+            remote_events = await guild.fetch_scheduled_events(with_counts=False)
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            logger.info("Could not list native events for event=%s: %s", event_record.event_id, exc)
+            return 0
+    removed = 0
+    scoped_slot_ids = (
+        None
+        if expected_slot_ids is None
+        else {int(slot_id) for slot_id in expected_slot_ids}
+    )
+    if expected_native_event_ids is None:
+        remote_ids = {
+            int(slot.native_scheduled_event_id)
+            for slot in events.slots(event_record.event_id)
+            if slot.native_scheduled_event_id
+            and (scoped_slot_ids is None or slot.slot_id in scoped_slot_ids)
+        }
+    else:
+        remote_ids = {
+            int(remote_id)
+            for remote_id in expected_native_event_ids
+            if remote_id is not None
+        }
+    for remote in remote_events:
+        description = str(getattr(remote, "description", "") or "")
+        marker_owned = (
+            native_event_is_bot_owned(remote, guild)
+            and any(
+                marker_event_id == int(event_record.event_id)
+                and (scoped_slot_ids is None or marker_slot_id in scoped_slot_ids)
+                for marker_event_id, marker_slot_id in native_event_marker_ids(description)
+            )
+        )
+        if (
+            int(remote.id) not in remote_ids
+            and not marker_owned
+        ):
+            continue
+        try:
+            await remote.delete(reason=f"MediaBot event #{event_record.event_id} retired")
+            removed += 1
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
+            logger.info("Could not retire Discord event %s: %s", remote.id, exc)
+    return removed
+
+
+async def prune_native_event_orphans(guild, remote_events, active_slots):
+    """Retire bot-owned orphan/duplicate events using exact durable slot markers."""
+
+    grouped = {}
+    retire = []
+    for remote in tuple(remote_events):
+        if not native_event_is_bot_owned(remote, guild):
+            continue
+        markers = native_event_marker_ids(getattr(remote, "description", ""))
+        active_markers = [marker for marker in markers if marker in active_slots]
+        if len(markers) != 1 or len(active_markers) != 1:
+            if markers:
+                retire.append(remote)
+            continue
+        grouped.setdefault(active_markers[0], []).append(remote)
+
+    for marker, matches in grouped.items():
+        if len(matches) <= 1:
+            continue
+        persisted_id = int(active_slots[marker].native_scheduled_event_id or 0)
+        keep = next(
+            (remote for remote in matches if int(remote.id) == persisted_id),
+            min(matches, key=lambda remote: int(remote.id)),
+        )
+        retire.extend(remote for remote in matches if remote is not keep)
+
+    removed_ids = set()
+    failed = False
+    for remote in retire:
+        if int(remote.id) in removed_ids:
+            continue
+        try:
+            await remote.delete(reason="MediaBot retired an orphaned or duplicate event")
+            removed_ids.add(int(remote.id))
+        except discord.NotFound:
+            removed_ids.add(int(remote.id))
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            failed = True
+            logger.warning("Could not retire orphaned Discord event %s: %s", remote.id, exc)
+    if removed_ids:
+        remote_events[:] = [
+            remote for remote in remote_events if int(remote.id) not in removed_ids
+        ]
+    return len(removed_ids), failed
+
+
+def native_event_reconciliation_batch(
+    event_record,
+    slots,
+    *,
+    guild,
+    remote_events,
+    reference,
+    limit=4,
+):
+    """Select a bounded, restart-stable batch without starving synced slots.
+
+    New slots retain priority so a freshly published long event converges
+    quickly.  Any spare capacity rotates through already-published slots using
+    the absolute reconciliation interval, so every remote event is eventually
+    rechecked for deletion or drift even after a process restart.
+    """
+
+    now = reference.astimezone(timezone.utc)
+    future = sorted(
+        (slot for slot in slots if slot.starts_at > now),
+        key=lambda value: (value.starts_at, value.slot_id),
+    )
+    remote_ids = {int(remote.id) for remote in remote_events}
+    owned_markers = {
+        marker
+        for remote in remote_events
+        if native_event_is_bot_owned(remote, guild)
+        for marker in native_event_marker_ids(getattr(remote, "description", ""))
+    }
+
+    def has_remote_identity(slot):
+        return (
+            slot.native_scheduled_event_id is not None
+            and int(slot.native_scheduled_event_id) in remote_ids
+        ) or (int(event_record.event_id), int(slot.slot_id)) in owned_markers
+
+    missing = [slot for slot in future if not has_remote_identity(slot)]
+    selected = missing[:limit]
+    remaining = max(0, int(limit) - len(selected))
+    synced = [slot for slot in future if has_remote_identity(slot)]
+    if remaining and synced:
+        cycle = int(now.timestamp() // EVENT_RECONCILE_SECONDS)
+        start = (cycle * remaining) % len(synced)
+        selected.extend(
+            synced[(start + offset) % len(synced)]
+            for offset in range(min(remaining, len(synced)))
+        )
+    return tuple(selected)
+
+
+class EventScheduleTimeTieSelect(discord.ui.Select):
+    def __init__(self, parent, options):
+        super().__init__(
+            placeholder="Choose the winning time",
+            options=[
+                discord.SelectOption(
+                    label=event_time_option_label(option, parent.timezone_name)[:100],
+                    value=str(option.time_option_id),
+                    description=f"{option.vote_count} availability votes",
+                )
+                for option in options
+            ],
+            min_values=1,
+            max_values=1,
+        )
+
+    async def callback(self, interaction):
+        await self.view.choose(interaction, int(self.values[0]))
+
+
+class EventScheduleTimeTieView(LoggedView):
+    def __init__(
+        self,
+        *,
+        requester_id,
+        guild_id,
+        event_record,
+        options,
+        command_message,
+    ):
+        super().__init__(timeout=REQUEST_UI_TIMEOUT)
+        self.requester_id = int(requester_id)
+        self.guild_id = int(guild_id)
+        self.event_record = event_record
+        self.event_id = int(event_record.event_id)
+        self.timezone_name = event_record.timezone_name
+        self.options = {option.time_option_id: option for option in options}
+        self.command_message = command_message
+        self.message = None
+        self.finished = False
+        self.add_item(EventScheduleTimeTieSelect(self, options))
+
+    def build_embed(self):
+        embed = discord.Embed(
+            title=compact_embed_title(f"Break the time tie: {self.event_record.name}"),
+            description=(
+                "These times have the same availability score. MediaBot will not "
+                "silently pick one; choose the time you actually want to publish."
+            ),
+            color=discord.Color.gold(),
+        )
+        add_event_line_fields(
+            embed,
+            "Tied times",
+            [
+                f"{discord.utils.format_dt(option.starts_at, style='F')} - **{option.vote_count}** available"
+                for option in self.options.values()
+            ],
+        )
+        return embed
+
+    async def interaction_check(self, interaction):
+        permissions = getattr(interaction.user, "guild_permissions", None)
+        if (
+            interaction.guild_id != self.guild_id
+            or interaction.user.id != self.requester_id
+            or not getattr(permissions, "administrator", False)
+        ):
+            await interaction.response.send_message(
+                "Only the administrator who opened this preview can break the tie.",
+                ephemeral=True,
+            )
+            return False
+        return await renew_transient_interaction(
+            interaction, self.message or getattr(interaction, "message", None)
+        )
+
+    async def choose(self, interaction, time_option_id):
+        option = self.options.get(int(time_option_id))
+        if option is None:
+            await interaction.response.send_message(
+                "That time is no longer in this tie.", ephemeral=True
+            )
+            return
+        try:
+            current = events.event(self.event_id, discord_guild_id=self.guild_id)
+            if current.revision != self.event_record.revision:
+                raise StaleEventRevisionError(
+                    "The event changed after this time tie was displayed."
+                )
+            validate_future_event_times((option.starts_at,))
+            plan = events.build_ranked_schedule(
+                self.event_id,
+                starts_at=(option.starts_at,),
+            )
+        except (
+            EventUsageError,
+            EventStateError,
+            EventNotFoundError,
+            StaleEventRevisionError,
+        ) as exc:
+            self.finished = True
+            self.stop()
+            await interaction.response.edit_message(content=str(exc), embed=None, view=None)
+            return
+        self.finished = True
+        self.stop()
+        view = EventScheduleView(
+            requester_id=self.requester_id,
+            guild_id=self.guild_id,
+            event_record=events.event(self.event_id),
+            plan=plan,
+            command_message=self.command_message,
+        )
+        view.message = self.message or interaction.message
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+    async def on_timeout(self):
+        if self.finished:
+            return
+        self.finished = True
+        self.stop()
+        await cleanup_unsuccessful_request(
+            origin_message=self.message,
+            command_message=self.command_message,
+        )
 
 
 class EventScheduleView(LoggedView):
@@ -6785,6 +8337,9 @@ class EventScheduleView(LoggedView):
             child.disabled = True
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
+            validate_future_event_times(
+                tuple(assignment.starts_at for assignment in self.plan.assignments)
+            )
             event_record, slots = events.schedule_ranked(self.plan)
         except StaleEventRevisionError as exc:
             self.finished = True
@@ -6824,7 +8379,10 @@ class EventScheduleView(LoggedView):
             embed=build_event_schedule_receipt(event_record, slots), view=None
         )
         await refresh_event_dashboard(event_record.event_id)
-        await interaction.followup.send("Schedule saved and voting closed.", ephemeral=True)
+        await interaction.followup.send(
+            "Schedule saved. Discord event publishing and reminders are queued.",
+            ephemeral=True,
+        )
 
     async def cancel(self, interaction):
         if self.finished or self.submitting:
@@ -7227,6 +8785,7 @@ async def run_transient_ui_cleanup_once(*, now=None, claim_token=None):
         preserve_interactive_success = record.kind in {
             "rating_saved_actions",
             "event_vote_saved_actions",
+            "event_time_vote_saved_actions",
         }
         try:
             message = await discord_message_by_id(
@@ -7350,9 +8909,283 @@ async def before_transient_ui_cleanup_watcher():
     await bot.wait_until_ready()
 
 
+def build_event_reminder_embed(reminder):
+    stage_title = {
+        1: "Tomorrow",
+        2: "Starting soon",
+        3: "Starting now",
+    }.get(int(reminder.stage), "Upcoming event")
+    title = event_display_title(reminder.title or "Media night", reminder.year)
+    embed = discord.Embed(
+        title=compact_embed_title(f"{stage_title}: {reminder.event_name}"),
+        description=(
+            f"**{title}**\n"
+            f"{discord.utils.format_dt(reminder.starts_at, style='F')} "
+            f"({discord.utils.format_dt(reminder.starts_at, style='R')})"
+        ),
+        color=discord.Color.green() if int(reminder.stage) == 3 else discord.Color.blurple(),
+    )
+    if reminder.jellyfin_item_id:
+        embed.add_field(
+            name="Watch",
+            value=f"[Open in Jellyfin]({jellyfin.watch_url(reminder.jellyfin_item_id)})",
+            inline=False,
+        )
+    embed.set_footer(text=f"Event #{reminder.event_id} - reminder {reminder.stage}/3")
+    return embed
+
+
+def event_reminder_allowed_mentions():
+    if EVENT_REMINDER_ROLE_ID is None:
+        return discord.AllowedMentions.none()
+    return discord.AllowedMentions(
+        everyone=False,
+        users=False,
+        roles=[discord.Object(id=EVENT_REMINDER_ROLE_ID)],
+        replied_user=False,
+    )
+
+
+def event_reminder_role_delivery_error(reminder):
+    """Return why a configured role cannot be pinged, before claiming delivery."""
+
+    if EVENT_REMINDER_ROLE_ID is None:
+        return None
+    guild = bot.get_guild(int(reminder.discord_guild_id))
+    if guild is None:
+        return f"Discord guild {reminder.discord_guild_id} is unavailable"
+    role = guild.get_role(int(EVENT_REMINDER_ROLE_ID))
+    if role is None:
+        return f"configured reminder role {EVENT_REMINDER_ROLE_ID} does not exist"
+    is_default = getattr(role, "is_default", None)
+    if int(getattr(role, "id", 0)) == int(guild.id) or (
+        callable(is_default) and is_default()
+    ):
+        return "the @everyone role cannot be used for event reminders"
+    permissions = getattr(getattr(guild, "me", None), "guild_permissions", None)
+    if not getattr(role, "mentionable", False) and not getattr(
+        permissions, "mention_everyone", False
+    ):
+        return (
+            f"reminder role {EVENT_REMINDER_ROLE_ID} is not mentionable and MediaBot "
+            "lacks Mention Everyone permission"
+        )
+    return None
+
+
+async def run_event_reconciliation_once(*, reference=None):
+    """Reconcile event rollover, native Discord events, and one-shot reminders."""
+
+    now = reference or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    stats = {"reminders": 0, "native_events": 0, "completed": 0, "failed": False}
+
+    for guild_id in sorted(ALLOWED_GUILD_IDS):
+        scheduled = events.list_events(
+            discord_guild_id=guild_id,
+            statuses=(EventStatus.SCHEDULED,),
+            limit=500,
+        )
+        scheduled_with_slots = tuple(
+            (event_record, events.slots(event_record.event_id))
+            for event_record in scheduled
+        )
+        active_slots = {
+            (event_record.event_id, slot.slot_id): slot
+            for event_record, slots in scheduled_with_slots
+            for slot in slots
+        }
+        has_event_history = bool(scheduled) or bool(
+            events.list_events(
+                discord_guild_id=guild_id,
+                limit=1,
+                include_archived=True,
+            )
+        )
+        guild = bot.get_guild(guild_id)
+        remote_events = None
+        if has_event_history:
+            if guild is None:
+                stats["failed"] = True
+                logger.warning("Native event guild unavailable guild=%s", guild_id)
+            else:
+                try:
+                    remote_events = list(
+                        await guild.fetch_scheduled_events(with_counts=False)
+                    )
+                except (discord.Forbidden, discord.HTTPException) as exc:
+                    stats["failed"] = True
+                    logger.warning(
+                        "Native event listing unavailable guild=%s: %s", guild_id, exc
+                    )
+        if guild is not None and remote_events is not None:
+            removed, prune_failed = await prune_native_event_orphans(
+                guild,
+                remote_events,
+                active_slots,
+            )
+            stats["native_events"] += removed
+            stats["failed"] = stats["failed"] or prune_failed
+        for event_record, slots in scheduled_with_slots:
+            if slots and max(slot.starts_at for slot in slots) + timedelta(
+                hours=EVENT_COMPLETION_GRACE_HOURS
+            ) <= now:
+                try:
+                    completed = events.complete(
+                        event_record.event_id,
+                        expected_revision=event_record.revision,
+                    )
+                    await refresh_event_dashboard(completed.event_id)
+                    if remote_events is not None:
+                        await remove_native_events(
+                            completed,
+                            remote_events=remote_events,
+                        )
+                    stats["completed"] += 1
+                except StaleEventRevisionError:
+                    logger.info(
+                        "Skipped stale event rollover event=%s",
+                        event_record.event_id,
+                    )
+                except Exception as exc:
+                    stats["failed"] = True
+                    log_exception(
+                        f"Could not roll over past event {event_record.event_id}", exc
+                    )
+                continue
+
+            if remote_events is None:
+                continue
+            native_batch = native_event_reconciliation_batch(
+                event_record,
+                slots,
+                guild=guild,
+                remote_events=remote_events,
+                reference=now,
+            )
+            for slot in native_batch:
+                try:
+                    if await sync_native_event_slot(
+                        event_record, slot, remote_events=remote_events
+                    ):
+                        stats["native_events"] += 1
+                except (
+                    EventNativeSyncError,
+                    discord.Forbidden,
+                    discord.HTTPException,
+                ) as exc:
+                    stats["failed"] = True
+                    logger.warning(
+                        "Native event sync failed event=%s slot=%s error=%s",
+                        event_record.event_id,
+                        slot.slot_id,
+                        exc,
+                    )
+                except Exception as exc:
+                    stats["failed"] = True
+                    log_exception(
+                        f"Native event sync failed event={event_record.event_id} slot={slot.slot_id}",
+                        exc,
+                    )
+
+    for reminder in events.due_reminders(reference=now):
+        if int(reminder.stage) == 3 and now > reminder.starts_at + timedelta(minutes=15):
+            # Never wake a server with a stale "starting now" ping after downtime.
+            events.advance_reminder(reminder.slot_id, reminder.stage)
+            continue
+        role_error = event_reminder_role_delivery_error(reminder)
+        if role_error:
+            stats["failed"] = True
+            logger.warning(
+                "Reminder role unavailable event=%s slot=%s: %s",
+                reminder.event_id,
+                reminder.slot_id,
+                role_error,
+            )
+            continue
+        channel = bot.get_channel(int(reminder.discord_channel_id))
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(int(reminder.discord_channel_id))
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
+                stats["failed"] = True
+                logger.warning(
+                    "Reminder channel unavailable event=%s channel=%s error=%s",
+                    reminder.event_id,
+                    reminder.discord_channel_id,
+                    exc,
+                )
+                continue
+        try:
+            if not events.claim_reminder(
+                reminder.slot_id,
+                reminder.stage,
+                event_id=reminder.event_id,
+                starts_at=reminder.starts_at,
+            ):
+                continue
+            await channel.send(
+                content=EVENT_REMINDER_MENTION or None,
+                embed=build_event_reminder_embed(reminder),
+                allowed_mentions=event_reminder_allowed_mentions(),
+            )
+            stats["reminders"] += 1
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            stats["failed"] = True
+            logger.warning(
+                "Reminder delivery failed event=%s slot=%s error=%s",
+                reminder.event_id,
+                reminder.slot_id,
+                exc,
+            )
+        except Exception as exc:
+            stats["failed"] = True
+            log_exception(
+                f"Reminder delivery failed event={reminder.event_id} slot={reminder.slot_id}",
+                exc,
+            )
+    return stats
+
+
+@tasks.loop(seconds=EVENT_RECONCILE_SECONDS)
+async def event_lifecycle_watcher():
+    global LAST_EVENT_RECONCILIATION
+    try:
+        stats = await run_event_reconciliation_once()
+    except Exception as exc:
+        log_exception("Event lifecycle watcher cycle failed", exc)
+        stats = {"reminders": 0, "native_events": 0, "completed": 0, "failed": True}
+    LAST_EVENT_RECONCILIATION = {**stats, "completed_at": time.time()}
+
+
+@event_lifecycle_watcher.before_loop
+async def before_event_lifecycle_watcher():
+    await bot.wait_until_ready()
+
+
+def register_persistent_event_dashboards():
+    registered = 0
+    for guild_id in sorted(ALLOWED_GUILD_IDS):
+        records = events.list_events(
+            discord_guild_id=guild_id,
+            statuses=(EventStatus.OPEN, EventStatus.SCHEDULED),
+            limit=100,
+        )
+        for event_record in records:
+            message_id = event_record.dashboard_message_id
+            if not message_id or int(message_id) in _registered_event_dashboard_messages:
+                continue
+            bot.add_view(EventDashboardView(event_record), message_id=int(message_id))
+            _registered_event_dashboard_messages.add(int(message_id))
+            registered += 1
+    return registered
+
+
 def runtime_worker_snapshot():
     return {
         "transient_ui_cleanup": transient_ui_cleanup_watcher.is_running(),
+        "event_lifecycle": event_lifecycle_watcher.is_running(),
         "jellyfin_availability": (
             not jellyfin.enabled or jellyfin_availability_watcher.is_running()
         ),
@@ -7379,6 +9212,16 @@ def runtime_metric_snapshot(now=None):
         ),
         "jellyfin_cycle_failed": bool(
             LAST_JELLYFIN_RECONCILIATION.get("failed", False)
+        ),
+        "event_last_run_age_seconds": age(
+            LAST_EVENT_RECONCILIATION.get("completed_at")
+        ),
+        "event_cycle_max_age_seconds": EVENT_CYCLE_MAX_AGE_SECONDS,
+        "event_cycle_failed": bool(
+            LAST_EVENT_RECONCILIATION.get("failed", False)
+        ),
+        "event_reminders_sent": int(
+            LAST_EVENT_RECONCILIATION.get("reminders") or 0
         ),
         "request_intents_prepared": intent_stats["prepared"],
         "request_intents_accepted": intent_stats["accepted"],
@@ -7460,6 +9303,7 @@ async def on_interaction(interaction):
         and active_record.kind in {
             "rating_saved_actions",
             "event_vote_saved_actions",
+            "event_time_vote_saved_actions",
         }
     ):
         try:
@@ -7509,8 +9353,16 @@ async def on_ready():
         jellyfin_availability_watcher.start()
     if not transient_ui_cleanup_watcher.is_running():
         transient_ui_cleanup_watcher.start()
+    if not event_lifecycle_watcher.is_running():
+        event_lifecycle_watcher.start()
     if not runtime_health_watcher.is_running():
         runtime_health_watcher.start()
+    try:
+        registered = register_persistent_event_dashboards()
+        if registered:
+            logger.info("Registered %s persistent event dashboard(s)", registered)
+    except Exception as exc:
+        log_exception("Could not register persistent event dashboards", exc)
     try:
         write_runtime_health_snapshot("ready")
     except Exception as exc:
@@ -7612,8 +9464,14 @@ COMMAND_USAGE = {
     "event create": "event create <name> [--votes N]",
     "event nominate": "event nominate <title> [year]",
     "event vote": "event vote",
+    "event time": "event time [YYYY-MM-DD HH:MM, ...]",
     "event schedule": "event schedule [YYYY-MM-DD HH:MM, ...]",
+    "event reschedule": "event reschedule <event id> [YYYY-MM-DD HH:MM, ...]",
+    "event reopen": "event reopen <event id>",
     "event tonight": "event tonight",
+    "event history": "event history",
+    "event archive": "event archive <event id>",
+    "event clear": "event clear",
     "event complete": "event complete <event id>",
     "event cancel": "event cancel <event id>",
     "music": "music <artist and track>",
@@ -7865,6 +9723,7 @@ async def mediabot_help(
                 f"`{prefix}event` - current event dashboard\n"
                 f"`{prefix}event nominate <title>` - add an exact title\n"
                 f"`{prefix}event vote` - choose your favorites\n"
+                f"`{prefix}event time` - vote on when everyone is available\n"
                 f"`{prefix}event tonight` - see tonight's schedule"
             ),
             inline=False,
@@ -8767,16 +10626,23 @@ async def report_media(ctx, *, value: str = ""):
 )
 @commands.guild_only()
 async def event_group(ctx):
-    event_record = events.current_event(ctx.guild.id)
-    if event_record is None:
-        scheduled = events.list_events(
-            discord_guild_id=ctx.guild.id,
-            statuses=(EventStatus.SCHEDULED,),
-            limit=1,
-        )
-        event_record = scheduled[0] if scheduled else None
+    event_record = current_visible_event(ctx.guild.id)
     if event_record is not None:
-        await ctx.reply(embed=build_event_dashboard_embed(event_record))
+        view = EventDashboardView(
+            event_record,
+            persistent=False,
+            command_message=ctx.message,
+        )
+        message = await ctx.reply(
+            embed=build_event_dashboard_embed(event_record),
+            view=view,
+        )
+        view.message = message
+        register_transient_card(
+            message=message,
+            command_message=ctx.message,
+            kind="event_dashboard_snapshot",
+        )
         return
 
     embed = discord.Embed(
@@ -8788,7 +10654,7 @@ async def event_group(ctx):
         name="Start here",
         value=(
             "Administrator: `$event create Friday Movie Night`\n"
-            "Everyone: `$event nominate <title>` then `$event vote`\n"
+            "Everyone: `$event nominate <title>`, `$event vote`, then `$event time`\n"
             "Tonight: `$event tonight`"
         ),
         inline=False,
@@ -8832,7 +10698,10 @@ async def event_create(ctx, *, value: str = ""):
         await ctx.reply(f"Couldn't create that event. Error ID: `{error_id}`")
         return
 
-    dashboard = await ctx.reply(embed=build_event_dashboard_embed(event_record))
+    dashboard = await ctx.reply(
+        embed=build_event_dashboard_embed(event_record),
+        view=EventDashboardView(event_record),
+    )
     try:
         event_record = events.set_dashboard_message(
             event_id=event_record.event_id,
@@ -8899,6 +10768,90 @@ async def event_nominate(ctx, *, query: str = ""):
 
 
 @event_group.command(
+    name="time",
+    help=(
+        "Vote for every candidate time you can attend. Administrators get a date/time "
+        "picker when no candidates exist, or may append local YYYY-MM-DD HH:MM values."
+    ),
+)
+@commands.guild_only()
+async def event_time(ctx, *, value: str = ""):
+    event_record = events.current_event(ctx.guild.id)
+    if event_record is None:
+        await ctx.reply("There is no open event to choose a time for.")
+        return
+    raw = str(value or "").strip()
+    options = events.future_time_options(event_record.event_id)
+    permissions = getattr(ctx.author, "guild_permissions", None)
+    is_admin = bool(getattr(permissions, "administrator", False))
+
+    if raw:
+        if not is_admin:
+            await ctx.reply("An administrator must propose candidate times.")
+            return
+        try:
+            if raw.casefold() in {"clear", "reset"}:
+                events.replace_time_options(
+                    event_record.event_id,
+                    (),
+                    ctx.author.id,
+                )
+            else:
+                starts_at = parse_schedule_input(
+                    raw, timezone_name=event_record.timezone_name
+                )
+                validate_future_event_times(starts_at)
+                events.add_time_options(
+                    event_record.event_id,
+                    starts_at,
+                    ctx.author.id,
+                )
+            options = events.future_time_options(event_record.event_id)
+        except (EventUsageError, EventStateError, EventNotFoundError) as exc:
+            await ctx.reply(str(exc))
+            return
+        await refresh_event_dashboard(event_record.event_id)
+
+    if not options:
+        if not is_admin:
+            await ctx.reply(
+                "No future candidate times remain. Ask an administrator to run `$event time`."
+            )
+            return
+        view = EventTimePickerView(
+            requester_id=ctx.author.id,
+            guild_id=ctx.guild.id,
+            event_record=event_record,
+            command_message=ctx.message,
+        )
+        message = await ctx.reply(embed=view.build_embed(), view=view)
+        view.message = message
+        register_transient_card(
+            message=message,
+            command_message=ctx.message,
+            kind="event_time_picker",
+        )
+        return
+
+    selected = events.user_time_vote_ids(event_record.event_id, ctx.author.id)
+    view = EventTimeVoteView(
+        requester_id=ctx.author.id,
+        guild_id=ctx.guild.id,
+        event_record=event_record,
+        options=options,
+        selected_ids=selected,
+        command_message=ctx.message,
+    )
+    message = await ctx.reply(embed=view.build_embed(), view=view)
+    view.message = message
+    register_transient_card(
+        message=message,
+        command_message=ctx.message,
+        kind="event_time_vote",
+    )
+
+
+@event_group.command(
     name="vote",
     help=(
         "Open your private-to-control ballot for the current event. Number buttons "
@@ -8939,9 +10892,8 @@ async def event_vote(ctx):
 @event_group.command(
     name="schedule",
     help=(
-        "Administrator: preview the ranked winners at local Denver times, then "
-        "confirm to freeze voting. Generic syntax uses comma-separated "
-        "YYYY-MM-DD HH:MM values; presets use their saved slots with no dates."
+        "Administrator: preview the title and time winners, then publish. Bare "
+        "schedule uses the availability winner; local YYYY-MM-DD HH:MM remains a fallback."
     ),
 )
 @commands.guild_only()
@@ -8958,15 +10910,61 @@ async def event_schedule(ctx, *, value: str = ""):
                     "This preset already saved its dates. Run `$event schedule` with no dates."
                 )
             plan = events.build_ranked_schedule(event_record.event_id)
-        else:
+        elif value.strip():
             starts_at = parse_schedule_input(
                 value,
                 timezone_name=event_record.timezone_name,
             )
+            validate_future_event_times(starts_at)
             plan = events.build_ranked_schedule(
                 event_record.event_id,
                 starts_at=starts_at,
             )
+        elif events.future_time_options(event_record.event_id):
+            ranked_times = events.future_time_options(
+                event_record.event_id,
+                ranked=True,
+            )
+            tied_times = tuple(
+                option
+                for option in ranked_times
+                if option.vote_count == ranked_times[0].vote_count
+            )
+            if len(tied_times) > 1:
+                view = EventScheduleTimeTieView(
+                    requester_id=ctx.author.id,
+                    guild_id=ctx.guild.id,
+                    event_record=event_record,
+                    options=tied_times,
+                    command_message=ctx.message,
+                )
+                message = await ctx.reply(embed=view.build_embed(), view=view)
+                view.message = message
+                register_transient_card(
+                    message=message,
+                    command_message=ctx.message,
+                    kind="event_schedule_preview",
+                )
+                return
+            plan = events.build_ranked_schedule(event_record.event_id)
+        else:
+            view = EventTimePickerView(
+                requester_id=ctx.author.id,
+                guild_id=ctx.guild.id,
+                event_record=event_record,
+                command_message=ctx.message,
+            )
+            message = await ctx.reply(embed=view.build_embed(), view=view)
+            view.message = message
+            register_transient_card(
+                message=message,
+                command_message=ctx.message,
+                kind="event_time_picker",
+            )
+            return
+        validate_future_event_times(
+            tuple(assignment.starts_at for assignment in plan.assignments)
+        )
     except (EventUsageError, EventStateError, EventNotFoundError) as exc:
         await ctx.reply(str(exc))
         return
@@ -8988,6 +10986,202 @@ async def event_schedule(ctx, *, value: str = ""):
         message=message,
         command_message=ctx.message,
         kind="event_schedule_preview",
+    )
+
+
+@event_group.command(
+    name="reschedule",
+    help=(
+        "Administrator: move a scheduled event without losing votes. With one slot, "
+        "omit dates for the picker; otherwise supply comma-separated local times."
+    ),
+)
+@commands.guild_only()
+@commands.has_guild_permissions(administrator=True)
+async def event_reschedule(ctx, event_id: int, *, value: str = ""):
+    try:
+        event_record = events.event(event_id, discord_guild_id=ctx.guild.id)
+        if event_record.status is not EventStatus.SCHEDULED:
+            raise EventStateError("Only a scheduled event can be rescheduled.")
+        slots = events.slots(event_record.event_id)
+        if not value.strip():
+            if len(slots) != 1:
+                raise EventUsageError(
+                    "This event has multiple slots. Supply one comma-separated local time per slot."
+                )
+            view = EventReschedulePickerView(
+                requester_id=ctx.author.id,
+                guild_id=ctx.guild.id,
+                event_record=event_record,
+                slot=slots[0],
+                command_message=ctx.message,
+            )
+            message = await ctx.reply(embed=view.build_embed(), view=view)
+            view.message = message
+            register_transient_card(
+                message=message,
+                command_message=ctx.message,
+                kind="event_reschedule_picker",
+            )
+            return
+        starts_at = parse_schedule_input(value, timezone_name=event_record.timezone_name)
+        validate_future_event_times(starts_at)
+        if len(starts_at) != len(slots):
+            raise EventUsageError(
+                f"Give exactly {len(slots)} date/time value(s), one for each existing slot."
+            )
+        assignments = tuple(
+            ScheduleAssignment(starts, slot.nomination_id)
+            for starts, slot in zip(starts_at, slots)
+        )
+        event_record, slots = events.reschedule_event(
+            event_record.event_id,
+            assignments,
+            expected_revision=event_record.revision,
+        )
+    except (
+        EventUsageError,
+        EventStateError,
+        EventNotFoundError,
+        StaleEventRevisionError,
+    ) as exc:
+        await ctx.reply(str(exc))
+        return
+    except Exception as exc:
+        error_id = log_exception(f"Could not reschedule event {event_id}", exc)
+        await ctx.reply(f"Couldn't reschedule that event. Error ID: `{error_id}`")
+        return
+    await refresh_event_dashboard(event_record.event_id)
+    await ctx.reply(embed=build_event_schedule_receipt(event_record, slots))
+
+
+@event_group.command(
+    name="reopen",
+    help="Administrator: reopen a scheduled event while retaining nominations and votes.",
+)
+@commands.guild_only()
+@commands.has_guild_permissions(administrator=True)
+async def event_reopen(ctx, event_id: int):
+    try:
+        existing = events.event(event_id, discord_guild_id=ctx.guild.id)
+        retired_slots = events.slots(existing.event_id)
+        updated = events.reopen(existing.event_id)
+    except (EventNotFoundError, EventStateError, OpenEventExistsError) as exc:
+        await ctx.reply(str(exc))
+        return
+    await remove_native_events(
+        existing,
+        expected_slot_ids={slot.slot_id for slot in retired_slots},
+        expected_native_event_ids={
+            slot.native_scheduled_event_id
+            for slot in retired_slots
+            if slot.native_scheduled_event_id
+        },
+    )
+    await refresh_event_dashboard(updated.event_id)
+    await ctx.reply(
+        f"**Reopened: {updated.name}**\nNominations, title votes, and time votes are live again."
+    )
+
+
+@event_group.command(
+    name="history",
+    help="Show recent active and archived events for this server.",
+)
+@commands.guild_only()
+async def event_history(ctx):
+    records = events.list_events(
+        discord_guild_id=ctx.guild.id,
+        limit=20,
+        include_archived=True,
+    )
+    if not records:
+        await ctx.reply("This server does not have any event history yet.")
+        return
+    lines = []
+    for record in records:
+        archived = " - archived" if record.archived_at else ""
+        lines.append(
+            f"**#{record.event_id} {record.name}** - {record.status.value}{archived}"
+        )
+    embeds = build_event_line_embeds(
+        title="Event history",
+        description="Recent event state is retained even when old dashboard cards are cleared.",
+        field_name="Events",
+        lines=lines,
+    )
+    for index, embed in enumerate(embeds):
+        if index == 0:
+            await ctx.reply(embed=embed)
+        else:
+            await ctx.send(embed=embed)
+
+
+@event_group.command(
+    name="archive",
+    help="Administrator: hide one completed or cancelled event without deleting its history.",
+)
+@commands.guild_only()
+@commands.has_guild_permissions(administrator=True)
+async def event_archive(ctx, event_id: int):
+    try:
+        existing = events.event(event_id, discord_guild_id=ctx.guild.id)
+        updated = events.archive(existing.event_id)
+    except (EventNotFoundError, EventStateError) as exc:
+        await ctx.reply(str(exc))
+        return
+    if existing.dashboard_message_id:
+        await delete_discord_message_by_id(
+            existing.discord_channel_id,
+            existing.dashboard_message_id,
+            label="archived event dashboard",
+        )
+    await ctx.reply(
+        f"Archived **#{updated.event_id} {updated.name}**. Its history is still available."
+    )
+
+
+@event_group.command(
+    name="clear",
+    help="Administrator: archive old terminal or fully elapsed events and remove stale dashboards.",
+)
+@commands.guild_only()
+@commands.has_guild_permissions(administrator=True)
+async def event_clear(ctx):
+    now = datetime.now(timezone.utc)
+    before = events.list_events(
+        discord_guild_id=ctx.guild.id,
+        limit=500,
+        include_archived=False,
+    )
+    eligible = {
+        record.event_id: record
+        for record in before
+        if record.status in {EventStatus.COMPLETED, EventStatus.CANCELLED}
+        or (
+            record.status is EventStatus.SCHEDULED
+            and events.slots(record.event_id)
+            and max(slot.starts_at for slot in events.slots(record.event_id))
+            + timedelta(hours=EVENT_COMPLETION_GRACE_HOURS)
+            < now
+        )
+    }
+    archived = events.clear_old(
+        ctx.guild.id,
+        reference=now - timedelta(hours=EVENT_COMPLETION_GRACE_HOURS),
+    )
+    for record in archived:
+        old = eligible.get(record.event_id)
+        if old and old.dashboard_message_id:
+            await delete_discord_message_by_id(
+                old.discord_channel_id,
+                old.dashboard_message_id,
+                label="cleared event dashboard",
+            )
+        await remove_native_events(old or record)
+    await ctx.reply(
+        f"Cleared **{len(archived)}** old event{'s' if len(archived) != 1 else ''}. "
+        "Nothing was hard-deleted; `$event history` still shows them."
     )
 
 
@@ -9057,6 +11251,7 @@ async def transition_event_command(ctx, event_id, target):
         return
 
     await refresh_event_dashboard(updated.event_id)
+    await remove_native_events(existing)
     verb = "Completed" if target == "complete" else "Cancelled"
     await ctx.reply(
         f"**{verb}: {updated.name}**\nEvent **#{updated.event_id}** is now "
@@ -10822,6 +13017,7 @@ async def main():
             runtime_health_watcher,
             transient_ui_cleanup_watcher,
             jellyfin_availability_watcher,
+            event_lifecycle_watcher,
         ):
             if watcher.is_running():
                 watcher_task = watcher.get_task()

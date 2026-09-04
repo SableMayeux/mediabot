@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import tempfile
 import time
@@ -99,11 +100,54 @@ def validate_runtime_health(
     workers = payload.get("workers")
     if not isinstance(workers, dict) or workers.get("transient_ui_cleanup") is not True:
         raise RuntimeHealthError("transient cleanup worker is not running")
+    if workers.get("event_lifecycle") is not True:
+        raise RuntimeHealthError("event lifecycle worker is not running")
     metrics = payload.get("metrics")
     if isinstance(metrics, dict) and metrics.get("cleanup_failed") is True:
         raise RuntimeHealthError("transient cleanup worker reported a failed cycle")
+    if isinstance(metrics, dict) and metrics.get("event_cycle_failed") is True:
+        raise RuntimeHealthError("event lifecycle worker reported a failed cycle")
     if isinstance(metrics, dict) and int(metrics.get("request_intents_accepted") or 0):
         raise RuntimeHealthError("accepted request intents still need local tracking")
+
+    if not isinstance(metrics, dict):
+        raise RuntimeHealthError("event lifecycle metrics are missing")
+    try:
+        event_cycle_max_age = float(metrics["event_cycle_max_age_seconds"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeHealthError(
+            "event lifecycle freshness threshold is invalid"
+        ) from exc
+    if not math.isfinite(event_cycle_max_age) or event_cycle_max_age < 1:
+        raise RuntimeHealthError("event lifecycle freshness threshold is invalid")
+
+    event_cycle_age_raw = metrics.get("event_last_run_age_seconds")
+    if event_cycle_age_raw is None:
+        try:
+            uptime = float(metrics["uptime_seconds"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeHealthError(
+                "event lifecycle has not completed and startup age is unavailable"
+            ) from exc
+        if not math.isfinite(uptime) or uptime < 0:
+            raise RuntimeHealthError("event lifecycle startup age is invalid")
+        if uptime > event_cycle_max_age:
+            raise RuntimeHealthError(
+                "event lifecycle worker has not completed its first cycle"
+            )
+    else:
+        try:
+            event_cycle_age = float(event_cycle_age_raw)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeHealthError(
+                "event lifecycle cycle age is invalid"
+            ) from exc
+        if not math.isfinite(event_cycle_age) or event_cycle_age < 0:
+            raise RuntimeHealthError("event lifecycle cycle age is invalid")
+        if event_cycle_age > event_cycle_max_age:
+            raise RuntimeHealthError(
+                "event lifecycle worker has not completed a recent cycle"
+            )
 
     try:
         updated_at = float(payload["updated_at"])
