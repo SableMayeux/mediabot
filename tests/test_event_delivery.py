@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import discord
+import aiohttp
 
 from mediabot.core.event_store import EventStore
 from mediabot.services.events import EventService, EventStatus, ScheduleAssignment
@@ -562,6 +563,23 @@ class EventDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.guild.fetch_calls, 1)
         self.assertEqual(self.guild.create_calls, 2)
+
+    async def test_reconciliation_treats_discord_dns_failure_as_retryable(self):
+        now = datetime.now(timezone.utc)
+        self.create_schedule(now + timedelta(days=2))
+        self.guild.fetch_scheduled_events = AsyncMock(
+            side_effect=aiohttp.ClientConnectionError("temporary DNS failure")
+        )
+
+        with self.assertLogs(self.app.logger.name, level="WARNING") as captured:
+            result = await self.app.run_event_reconciliation_once(reference=now)
+
+        self.assertTrue(result["failed"])
+        self.assertEqual(result["native_events"], 0)
+        self.assertEqual(self.guild.create_calls, 0)
+        self.assertTrue(
+            any("Native event listing unavailable" in line for line in captured.output)
+        )
 
     async def test_rollover_cannot_complete_an_event_rescheduled_during_fetch(self):
         reference = datetime.now(timezone.utc)

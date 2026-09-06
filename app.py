@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from zoneinfo import ZoneInfo
 
+import aiohttp
 import discord
 from discord.ext import commands, tasks
 
@@ -117,7 +118,18 @@ DB_PATH = os.environ.get(
 
 PREFIX = "$"
 
-BOT_VERSION = "1.0.0"
+BOT_VERSION = "1.0.1"
+
+# discord.py normally wraps non-successful API responses in HTTPException, but
+# aiohttp connection failures can escape directly before Discord returns a
+# response.  Treat DNS, TCP, TLS, and timeout failures as retryable API
+# unavailability so a brief WAN/DNS interruption does not become an unhandled
+# lifecycle-worker failure.
+DISCORD_API_ERRORS = (
+    discord.HTTPException,
+    aiohttp.ClientError,
+    asyncio.TimeoutError,
+)
 
 
 def parse_allowed_guild_ids(value):
@@ -7854,7 +7866,7 @@ async def discard_stale_native_event(remote, guild, remote_events, marker):
         await remote.delete(reason=f"{marker} discarded after local schedule changed")
     except discord.NotFound:
         pass
-    except (discord.Forbidden, discord.HTTPException) as exc:
+    except DISCORD_API_ERRORS as exc:
         raise EventNativeSyncError(
             f"Could not discard stale Discord event {remote.id}: {exc}"
         ) from exc
@@ -8013,7 +8025,7 @@ async def remove_native_events(
     if remote_events is None:
         try:
             remote_events = await guild.fetch_scheduled_events(with_counts=False)
-        except (discord.Forbidden, discord.HTTPException) as exc:
+        except DISCORD_API_ERRORS as exc:
             logger.info("Could not list native events for event=%s: %s", event_record.event_id, exc)
             return 0
     removed = 0
@@ -8053,7 +8065,7 @@ async def remove_native_events(
         try:
             await remote.delete(reason=f"MediaBot event #{event_record.event_id} retired")
             removed += 1
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
+        except DISCORD_API_ERRORS as exc:
             logger.info("Could not retire Discord event %s: %s", remote.id, exc)
     return removed
 
@@ -8094,7 +8106,7 @@ async def prune_native_event_orphans(guild, remote_events, active_slots):
             removed_ids.add(int(remote.id))
         except discord.NotFound:
             removed_ids.add(int(remote.id))
-        except (discord.Forbidden, discord.HTTPException) as exc:
+        except DISCORD_API_ERRORS as exc:
             failed = True
             logger.warning("Could not retire orphaned Discord event %s: %s", remote.id, exc)
     if removed_ids:
@@ -9014,7 +9026,7 @@ async def run_event_reconciliation_once(*, reference=None):
                     remote_events = list(
                         await guild.fetch_scheduled_events(with_counts=False)
                     )
-                except (discord.Forbidden, discord.HTTPException) as exc:
+                except DISCORD_API_ERRORS as exc:
                     stats["failed"] = True
                     logger.warning(
                         "Native event listing unavailable guild=%s: %s", guild_id, exc
@@ -9070,11 +9082,7 @@ async def run_event_reconciliation_once(*, reference=None):
                         event_record, slot, remote_events=remote_events
                     ):
                         stats["native_events"] += 1
-                except (
-                    EventNativeSyncError,
-                    discord.Forbidden,
-                    discord.HTTPException,
-                ) as exc:
+                except (EventNativeSyncError, *DISCORD_API_ERRORS) as exc:
                     stats["failed"] = True
                     logger.warning(
                         "Native event sync failed event=%s slot=%s error=%s",
@@ -9108,7 +9116,7 @@ async def run_event_reconciliation_once(*, reference=None):
         if channel is None:
             try:
                 channel = await bot.fetch_channel(int(reminder.discord_channel_id))
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
+            except DISCORD_API_ERRORS as exc:
                 stats["failed"] = True
                 logger.warning(
                     "Reminder channel unavailable event=%s channel=%s error=%s",
@@ -9131,7 +9139,7 @@ async def run_event_reconciliation_once(*, reference=None):
                 allowed_mentions=event_reminder_allowed_mentions(),
             )
             stats["reminders"] += 1
-        except (discord.Forbidden, discord.HTTPException) as exc:
+        except DISCORD_API_ERRORS as exc:
             stats["failed"] = True
             logger.warning(
                 "Reminder delivery failed event=%s slot=%s error=%s",
@@ -9153,6 +9161,9 @@ async def event_lifecycle_watcher():
     global LAST_EVENT_RECONCILIATION
     try:
         stats = await run_event_reconciliation_once()
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        logger.warning("Event lifecycle watcher waiting for Discord network: %s", exc)
+        stats = {"reminders": 0, "native_events": 0, "completed": 0, "failed": True}
     except Exception as exc:
         log_exception("Event lifecycle watcher cycle failed", exc)
         stats = {"reminders": 0, "native_events": 0, "completed": 0, "failed": True}

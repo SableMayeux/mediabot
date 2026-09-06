@@ -63,7 +63,7 @@ class RuntimeHealthTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeHealthError, "version"):
             validate_runtime_health(
                 self.path,
-                expected_version="1.0.0",
+                expected_version="1.0.1",
                 now=1001,
             )
 

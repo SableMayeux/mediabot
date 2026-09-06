@@ -5,6 +5,21 @@ All notable changes to Dogginator MediaBot are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses semantic version numbers.
 
+## [1.0.1] - 2026-09-06
+
+### Fixed
+
+- Treated Discord DNS, connection, TLS, and timeout failures as retryable
+  event-reconciliation failures instead of emitting an unhandled worker
+  traceback.
+- Kept an unavailable Discord API listing from discarding local event state;
+  the lifecycle worker retries reconciliation on its next bounded cycle.
+
+### Verified
+
+- Added a regression for the raw `aiohttp` connection error that discord.py can
+  surface before an HTTP response exists.
+
 ## [1.0.0] - 2026-09-04
 
 ### Changed
