@@ -5,6 +5,27 @@ All notable changes to Dogginator MediaBot are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses semantic version numbers.
 
+## [1.1.0] - 2026-09-06
+
+### Added
+
+- Added a fresh availability reply that mentions the exact Discord requester
+  after the requested movie, seasons, or repaired episodes arrive in Jellyfin.
+- Added durable availability-notification delivery fields so a missing original
+  card or temporary Discord failure remains retryable.
+
+### Changed
+
+- Restricted allowed mentions to the stored requester ID; titles cannot ping
+  `@everyone`, roles, or unrelated users.
+- Backfilled previously completed request rows during migration so upgrading
+  does not reannounce the historical library.
+
+### Verified
+
+- Added database migration, pending-delivery, exact-mention, and failed-send
+  regression coverage.
+
 ## [1.0.1] - 2026-09-06
 
 ### Fixed

@@ -5,7 +5,7 @@ stack. It gives household users one small, consistent command surface while
 leaving media search, approval, acquisition, and playback with the services
 that already own those jobs.
 
-Current source version: **1.0.1**
+Current source version: **1.1.0**
 
 The 1.x line is the stable household-media release: its command model,
 provider boundaries, durable request state, and event lifecycle are treated as
@@ -17,6 +17,8 @@ beyond the current media stack. See [ROADMAP.md](ROADMAP.md).
 - Searches and requests movies or specific TV seasons through Seerr.
 - Repairs exact missing episodes through Sonarr when a previously approved
   season is only partially present.
+- Replies to completed request cards with a restricted `@requester` mention so
+  the person who asked for the title gets the availability notification.
 - Browses only media currently playable in Jellyfin with `$discover`.
 - Ranks unseen, requestable media with `$recommend`, using explicit 1-10
   ratings and optional Jellyfin/Trakt taste signals.
@@ -215,8 +217,8 @@ The repository uses the standard library `unittest` runner:
 python -m pip check
 python -m compileall -q app.py mediabot scripts tests
 python -m unittest discover -s tests -q
-test -x scripts/deploy_v101.sh
-sh -n scripts/deploy_v101.sh
+test -x scripts/deploy_v110.sh
+sh -n scripts/deploy_v110.sh
 ```
 
 The GitHub Actions workflow runs the same dependency, compilation, deployer
@@ -224,7 +226,7 @@ syntax, and full unit-test gates on Python 3.13.
 
 ## Deployment note
 
-`scripts/deploy_v101.sh` is a guarded, transactional deployer for the current
+`scripts/deploy_v110.sh` is a guarded, transactional deployer for the current
 Compose layout. It backs up the runtime and SQLite database, verifies hashes
 and database integrity, performs security and health gates, and rolls back on
 failure. It is intentionally opinionated: audit its target paths, service

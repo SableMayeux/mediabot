@@ -275,7 +275,16 @@ MediaBot resolves TMDB ID -> Jellyfin Item ID
 ORIGINAL DISCORD CARD EDITED
   |
   v
+FRESH REPLY PINGS THE STORED DISCORD REQUESTER
+  |
+  v
 WATCH IN JELLYFIN
+
+Library availability and Discord notification delivery are persisted
+separately. A deleted original card does not prevent the requester ping, and an
+unconfirmed send remains pending for the next watcher cycle. On upgrade,
+already-completed rows are backfilled as notified instead of spamming old
+requesters.
 
 
 ## Playback Report Lifecycle

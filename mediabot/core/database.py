@@ -66,7 +66,9 @@ def init_tracking_db():
 
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                available_at TEXT
+                available_at TEXT,
+                availability_notification_message_id INTEGER,
+                availability_notified_at TEXT
             )
             """
         )
@@ -214,6 +216,38 @@ def init_tracking_db():
             conn.execute(
                 "ALTER TABLE request_messages "
                 "ADD COLUMN requested_episode_numbers TEXT NOT NULL DEFAULT '{}'"
+            )
+
+        notification_schema_added = False
+        if "availability_notification_message_id" not in request_columns:
+            conn.execute(
+                "ALTER TABLE request_messages "
+                "ADD COLUMN availability_notification_message_id INTEGER"
+            )
+            notification_schema_added = True
+
+        if "availability_notified_at" not in request_columns:
+            conn.execute(
+                "ALTER TABLE request_messages "
+                "ADD COLUMN availability_notified_at TEXT"
+            )
+            notification_schema_added = True
+
+        if notification_schema_added:
+            # Rows completed before mention delivery existed must not all ping
+            # users on the first upgraded watcher cycle.
+            conn.execute(
+                """
+                UPDATE request_messages
+                SET availability_notified_at = COALESCE(
+                    available_at,
+                    updated_at,
+                    created_at,
+                    CURRENT_TIMESTAMP
+                )
+                WHERE jellyfin_available = 1
+                  AND availability_notified_at IS NULL
+                """
             )
 
         conn.execute(
@@ -706,7 +740,10 @@ def pending_requests(
             """
             SELECT *
             FROM request_messages
-            WHERE jellyfin_available = 0
+            WHERE (
+                jellyfin_available = 0
+                OR availability_notified_at IS NULL
+            )
               AND lower(request_status) NOT IN ('declined', 'failed')
             ORDER BY created_at ASC
             LIMIT ?
@@ -835,6 +872,32 @@ def mark_available(
                 int(seerr_request_id),
             )
         )
+
+
+def mark_availability_notified(
+    *,
+    seerr_request_id: int,
+    discord_message_id: int,
+) -> None:
+    """Record a confirmed requester mention after Discord returns its message."""
+
+    with connection() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE request_messages
+            SET availability_notification_message_id = ?,
+                availability_notified_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE seerr_request_id = ?
+              AND jellyfin_available = 1
+              AND availability_notified_at IS NULL
+            """,
+            (int(discord_message_id), int(seerr_request_id)),
+        )
+        if int(cursor.rowcount) != 1:
+            raise RuntimeError(
+                "Availability notification does not belong to one pending request."
+            )
 
 
 def tracking_stats(*, discord_guild_id: int | None = None):

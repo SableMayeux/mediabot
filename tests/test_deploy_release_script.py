@@ -6,10 +6,10 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "scripts" / "deploy_v101.sh"
+SCRIPT = ROOT / "scripts" / "deploy_v110.sh"
 
 
-class DeployV101ContractTests(unittest.TestCase):
+class DeployV110ContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.source = SCRIPT.read_text(encoding="utf-8")
@@ -23,8 +23,8 @@ class DeployV101ContractTests(unittest.TestCase):
         self.assertTrue(SCRIPT.is_file())
 
     def test_release_and_stage_are_exact(self):
-        self.assertIn('release_version="1.0.1"', self.source)
-        self.assertIn('stage_namespace="/tmp/mediabot-v101-"', self.source)
+        self.assertIn('release_version="1.1.0"', self.source)
+        self.assertIn('stage_namespace="/tmp/mediabot-v110-"', self.source)
         self.assertNotIn("mediabot-v091-", self.source)
         self.assertNotIn("mediabot-v080-", self.source)
 
@@ -55,7 +55,7 @@ class DeployV101ContractTests(unittest.TestCase):
         self.assertIn("MEDIABOT_ALLOWED_GUILD_IDS", self.source)
         self.assertIn('"ALLOWED_GUILD_IDS=" + value', self.source)
         self.assertIn("os.chown(directory, 1000, 1000)", self.source)
-        self.assertIn(".mediabot-write-probe-v101", self.source)
+        self.assertIn(".mediabot-write-probe-v110", self.source)
         self.assertIn('connection.execute("BEGIN IMMEDIATE")', self.source)
 
     def test_event_schema_v2_is_a_release_gate(self):
@@ -71,6 +71,10 @@ class DeployV101ContractTests(unittest.TestCase):
         )
         self.assertIn("EVENT_SCHEMA_VERSION", self.source)
         self.assertIn("EventStore._validate_v2(connection)", self.source)
+
+    def test_requester_notification_migration_is_a_release_gate(self):
+        self.assertIn("availability_notification_message_id", self.source)
+        self.assertIn("availability_notified_at", self.source)
 
     def test_cross_version_deployers_share_stable_and_transition_locks(self):
         for source in (self.source, self.legacy_source):

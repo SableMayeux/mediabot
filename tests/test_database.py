@@ -64,6 +64,81 @@ class RequestTrackingMigrationTests(unittest.TestCase):
             {"1": list(range(1, 12)), "2": list(range(1, 11))},
         )
 
+    def test_available_request_stays_pending_until_mention_is_confirmed(self):
+        database.init_tracking_db()
+        database.track_request(
+            seerr_request_id=43,
+            media_type="movie",
+            tmdb_id=348,
+            title="Alien",
+            year="1979",
+            requester_discord_id=1,
+            discord_guild_id=2,
+            discord_channel_id=3,
+            discord_message_id=4,
+            request_status="Approved",
+        )
+
+        database.mark_available(
+            seerr_request_id=43,
+            jellyfin_item_id="jellyfin-348",
+        )
+        self.assertEqual([row["seerr_request_id"] for row in database.pending_requests()], [43])
+
+        database.mark_availability_notified(
+            seerr_request_id=43,
+            discord_message_id=9001,
+        )
+
+        self.assertEqual(database.pending_requests(), [])
+        row = database.request_by_id(43)
+        self.assertEqual(row["availability_notification_message_id"], 9001)
+        self.assertIsNotNone(row["availability_notified_at"])
+
+    def test_notification_migration_does_not_reannounce_completed_history(self):
+        with database.connection() as conn:
+            conn.execute(
+                """
+                CREATE TABLE request_messages (
+                    seerr_request_id INTEGER PRIMARY KEY,
+                    media_type TEXT NOT NULL,
+                    tmdb_id INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    year TEXT,
+                    requester_discord_id INTEGER,
+                    discord_guild_id INTEGER,
+                    discord_channel_id INTEGER NOT NULL,
+                    discord_message_id INTEGER NOT NULL,
+                    request_status TEXT,
+                    requested_seasons TEXT NOT NULL DEFAULT '',
+                    requested_episode_counts TEXT NOT NULL DEFAULT '{}',
+                    requested_episode_numbers TEXT NOT NULL DEFAULT '{}',
+                    jellyfin_item_id TEXT,
+                    jellyfin_available INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    available_at TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO request_messages (
+                    seerr_request_id, media_type, tmdb_id, title,
+                    requester_discord_id, discord_guild_id,
+                    discord_channel_id, discord_message_id, request_status,
+                    jellyfin_item_id, jellyfin_available, available_at
+                ) VALUES (44, 'movie', 348, 'Alien', 1, 2, 3, 4,
+                          'Approved', 'jellyfin-348', 1, '2026-09-01 12:00:00')
+                """
+            )
+
+        database.init_tracking_db()
+
+        row = database.request_by_id(44)
+        self.assertEqual(row["availability_notified_at"], "2026-09-01 12:00:00")
+        self.assertEqual(database.pending_requests(), [])
+
     def test_media_request_intent_is_durable_until_tracking_commits(self):
         database.init_tracking_db()
         database.begin_media_request_intent(

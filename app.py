@@ -23,6 +23,7 @@ from mediabot.core.database import (
     track_request,
     pending_requests,
     mark_available,
+    mark_availability_notified,
     tracking_stats,
     save_rating,
     ratings_for_user,
@@ -118,7 +119,7 @@ DB_PATH = os.environ.get(
 
 PREFIX = "$"
 
-BOT_VERSION = "1.0.1"
+BOT_VERSION = "1.1.0"
 
 # discord.py normally wraps non-successful API responses in HTTPException, but
 # aiohttp connection failures can escape directly before Discord returns a
@@ -8517,6 +8518,54 @@ async def tracked_seasons_are_available(record, jellyfin_item):
     )
 
 
+def tracked_requester_discord_id(record):
+    try:
+        requester_id = int(record["requester_discord_id"])
+    except (KeyError, TypeError, ValueError, IndexError):
+        return None
+    return requester_id if requester_id > 0 else None
+
+
+async def send_jellyfin_availability_notification(
+    channel,
+    record,
+    *,
+    origin_message=None,
+):
+    """Send a fresh, restricted mention and durably confirm its delivery."""
+
+    requester_id = tracked_requester_discord_id(record)
+    title = discord.utils.escape_markdown(str(record["title"]))
+    if requester_id is None:
+        content = f"**{title}** is now available in Jellyfin."
+        allowed_mentions = discord.AllowedMentions.none()
+    else:
+        content = f"Requested by <@{requester_id}> - **{title}** is now available in Jellyfin."
+        allowed_mentions = discord.AllowedMentions(
+            everyone=False,
+            users=[discord.Object(id=requester_id)],
+            roles=False,
+            replied_user=False,
+        )
+
+    send_options = {
+        "content": content,
+        "allowed_mentions": allowed_mentions,
+    }
+    if origin_message is not None:
+        send_options.update(
+            reference=origin_message,
+            mention_author=False,
+        )
+
+    notification = await channel.send(**send_options)
+    mark_availability_notified(
+        seerr_request_id=int(record["seerr_request_id"]),
+        discord_message_id=int(notification.id),
+    )
+    return notification
+
+
 async def run_jellyfin_availability_once():
 
     if not jellyfin.enabled:
@@ -8561,12 +8610,13 @@ async def run_jellyfin_availability_once():
             if not await tracked_seasons_are_available(record, jf_item):
                 continue
 
-            # Library truth must not depend on whether an old Discord message
-            # still exists or remains editable.
-            mark_available(
-                seerr_request_id=record["seerr_request_id"],
-                jellyfin_item_id=jf_item["Id"],
-            )
+            # Library truth and notification delivery are separate durable
+            # facts. A missing old Discord card must not lose the new mention.
+            if not int(record["jellyfin_available"]):
+                mark_available(
+                    seerr_request_id=record["seerr_request_id"],
+                    jellyfin_item_id=jf_item["Id"],
+                )
 
             channel = bot.get_channel(
                 int(
@@ -8588,13 +8638,17 @@ async def run_jellyfin_availability_once():
                     )
                 )
 
-            message = await channel.fetch_message(
-                int(
-                    record[
-                        "discord_message_id"
-                    ]
+            message = None
+            try:
+                message = await channel.fetch_message(
+                    int(record["discord_message_id"])
                 )
-            )
+            except DISCORD_API_ERRORS as exc:
+                logger.info(
+                    "Original request card unavailable request=%s: %s",
+                    record["seerr_request_id"],
+                    exc,
+                )
 
             media_type = record[
                 "media_type"
@@ -8677,14 +8731,26 @@ async def run_jellyfin_availability_once():
                 )
             )
 
-            await message.edit(
-                embed=final_embed,
-                view=JellyfinAvailableView(
-                    item=item,
-                    jellyfin_item_id=(
-                        jf_item["Id"]
+            if message is not None:
+                try:
+                    await message.edit(
+                        embed=final_embed,
+                        view=JellyfinAvailableView(
+                            item=item,
+                            jellyfin_item_id=jf_item["Id"],
+                        ),
                     )
-                )
+                except DISCORD_API_ERRORS as exc:
+                    logger.info(
+                        "Could not refresh available request card request=%s: %s",
+                        record["seerr_request_id"],
+                        exc,
+                    )
+
+            notification = await send_jellyfin_availability_notification(
+                channel,
+                record,
+                origin_message=message,
             )
 
             logger.info(
@@ -8692,13 +8758,15 @@ async def run_jellyfin_availability_once():
                     "JELLYFIN AVAILABLE | "
                     "request_id=%s | "
                     "title=%s | "
-                    "jellyfin_item=%s"
+                    "jellyfin_item=%s | "
+                    "notification_message=%s"
                 ),
                 record[
                     "seerr_request_id"
                 ],
                 record["title"],
-                jf_item["Id"]
+                jf_item["Id"],
+                notification.id,
             )
 
         except Exception as exc:

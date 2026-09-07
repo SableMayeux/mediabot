@@ -23,7 +23,7 @@ class AppImportTests(unittest.TestCase):
             import app
             from mediabot.providers.seerr import SeerrProvider
 
-            self.assertEqual(app.BOT_VERSION, "1.0.1")
+            self.assertEqual(app.BOT_VERSION, "1.1.0")
             self.assertIsInstance(app.seerr, SeerrProvider)
             self.assertEqual(app.seerr.api_key, "test-key")
             for command_name in ("discover", "recommend", "rate", "report"):
@@ -583,6 +583,69 @@ class RankedBatchStateTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(incomplete)
         self.assertTrue(complete)
+
+    async def test_availability_notification_mentions_only_the_requester(self):
+        app = self.load_app()
+        previous_mark = app.mark_availability_notified
+        mark_notified = Mock()
+        app.mark_availability_notified = mark_notified
+        origin = SimpleNamespace(id=444)
+        channel = SimpleNamespace(
+            send=AsyncMock(return_value=SimpleNamespace(id=555))
+        )
+        record = {
+            "seerr_request_id": 279,
+            "requester_discord_id": 123456789,
+            "title": "The Rookie @everyone",
+        }
+
+        try:
+            result = await app.send_jellyfin_availability_notification(
+                channel,
+                record,
+                origin_message=origin,
+            )
+        finally:
+            app.mark_availability_notified = previous_mark
+
+        self.assertEqual(result.id, 555)
+        sent = channel.send.await_args.kwargs
+        self.assertEqual(
+            sent["content"],
+            "Requested by <@123456789> - **The Rookie @everyone** is now available in Jellyfin.",
+        )
+        self.assertEqual(sent["reference"], origin)
+        self.assertFalse(sent["mention_author"])
+        self.assertEqual(
+            sent["allowed_mentions"].to_dict(),
+            {"users": [123456789], "parse": []},
+        )
+        mark_notified.assert_called_once_with(
+            seerr_request_id=279,
+            discord_message_id=555,
+        )
+
+    async def test_failed_availability_ping_remains_delivery_pending(self):
+        app = self.load_app()
+        previous_mark = app.mark_availability_notified
+        mark_notified = Mock()
+        app.mark_availability_notified = mark_notified
+        channel = SimpleNamespace(send=AsyncMock(side_effect=RuntimeError("offline")))
+
+        try:
+            with self.assertRaisesRegex(RuntimeError, "offline"):
+                await app.send_jellyfin_availability_notification(
+                    channel,
+                    {
+                        "seerr_request_id": 280,
+                        "requester_discord_id": 123456789,
+                        "title": "The Gentlemen",
+                    },
+                )
+        finally:
+            app.mark_availability_notified = previous_mark
+
+        mark_notified.assert_not_called()
 
 
 if __name__ == "__main__":
