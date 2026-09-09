@@ -5,12 +5,11 @@ stack. It gives household users one small, consistent command surface while
 leaving media search, approval, acquisition, and playback with the services
 that already own those jobs.
 
-Current source version: **1.1.0**
+Current source version: **2.0.0**
 
-The 1.x line is the stable household-media release: its command model,
-provider boundaries, durable request state, and event lifecycle are treated as
-public compatibility contracts. Version 2.x is reserved for integrations
-beyond the current media stack. See [ROADMAP.md](ROADMAP.md).
+The 1.x household-media command model remains a compatibility contract. The
+2.x line adds private owner workflows around that stable core without turning
+household commands into an administration console. See [ROADMAP.md](ROADMAP.md).
 
 ## What it does
 
@@ -29,6 +28,12 @@ beyond the current media stack. See [ROADMAP.md](ROADMAP.md).
   editable schedules, Discord Scheduled Events, reminders, and history.
 - Cleans up abandoned interactive messages after five minutes while preserving
   successful receipts.
+- Gives the bot owner a durable `$think` inbox for raw Markdown captures. A
+  thought is always saved before any future classification; it is not silently
+  promoted into a task.
+- Gives the bot owner a narrow `$torrent movie|tv <magnet>` intake path that
+  removes the Discord source message before submission and can reach only the
+  VPN/quarantine gateway, never qBittorrent's administrative API.
 
 MediaBot is deliberately not a replacement for Seerr, Jellyfin, Sonarr,
 Radarr, or SoulSync. The detailed provider boundaries and request lifecycles
@@ -61,6 +66,12 @@ The default prefix is `$`.
 | `$event clear` | Administrator: complete expired schedules and archive terminal events. |
 | `$new [count]` | Show recently added Jellyfin media. |
 | `$help [command]` | Show the current user-facing command model and generated details. |
+
+Two hidden owner utilities are intentionally omitted from normal help:
+`$think <text>` (alias `$capture`) writes a private raw note, while
+`$torrent <movie|tv> <magnet>` accepts one BTIH magnet in the configured Media
+Discord. The latter is unavailable in DMs because MediaBot cannot delete the
+user's DM source; if guild-message deletion fails, nothing is queued.
 
 `$random` remains a compatibility alias for `$discover --random`.
 `$randomrequest` and `$rr` alias `$recommend --random`; `$ratings` aliases
@@ -108,7 +119,9 @@ Discord command or button
           +-----> Seerr: search, approval, requests, TMDB metadata
           +-----> Jellyfin: playable library, history, links, reports
           +-----> Sonarr: exact episode inventory and partial repair
-          `-----> SoulSync: music search and acquisition
+          +-----> SoulSync: music search and acquisition
+          +-----> Markdown inbox: immutable owner thought captures
+          `-----> Torrent intake: token-scoped gateway -> VPN quarantine
 ```
 
 Seerr is the required video request broker. Jellyfin, Sonarr, and SoulSync are
@@ -129,8 +142,8 @@ its local 1-10 rating store authoritative.
 - Optional Jellyfin, Sonarr, and SoulSync API credentials.
 
 MediaBot refuses to start without at least one trusted guild in
-`ALLOWED_GUILD_IDS`. Direct messages are rejected, and the bot leaves guilds
-outside the allowlist.
+`ALLOWED_GUILD_IDS`. Direct messages are rejected except for the owner's
+private `$think` capture, and the bot leaves guilds outside the allowlist.
 
 ## Configuration
 
@@ -157,6 +170,8 @@ Optional integration groups:
 | Jellyfin | `JELLYFIN_URL`, `JELLYFIN_API_KEY`, `JELLYFIN_PUBLIC_URL`, `JELLYFIN_TASTE_USER` |
 | Sonarr | `SONARR_URL`, `SONARR_API_KEY` |
 | SoulSync | `SOULSYNC_URL`, `SOULSYNC_API_KEY`, `SOULSYNC_PUBLIC_URL` |
+| Private capture | `LIFE_CAPTURE_PATH` |
+| Torrent intake | `TORRENT_INTAKE_URL`, `TORRENT_INTAKE_TOKEN_PATH` |
 
 Operational settings include `DB_PATH`, `LOG_PATH`, `LOG_MAX_BYTES`,
 `LOG_BACKUP_COUNT`, `RUNTIME_HEALTH_PATH`, `REQUEST_UI_TIMEOUT`,
@@ -217,8 +232,8 @@ The repository uses the standard library `unittest` runner:
 python -m pip check
 python -m compileall -q app.py mediabot scripts tests
 python -m unittest discover -s tests -q
-test -x scripts/deploy_v110.sh
-sh -n scripts/deploy_v110.sh
+test -x scripts/deploy_v200.sh
+sh -n scripts/deploy_v200.sh
 ```
 
 The GitHub Actions workflow runs the same dependency, compilation, deployer
@@ -226,7 +241,7 @@ syntax, and full unit-test gates on Python 3.13.
 
 ## Deployment note
 
-`scripts/deploy_v110.sh` is a guarded, transactional deployer for the current
+`scripts/deploy_v200.sh` is a guarded, transactional deployer for the current
 Compose layout. It backs up the runtime and SQLite database, verifies hashes
 and database integrity, performs security and health gates, and rolls back on
 failure. It is intentionally opinionated: audit its target paths, service

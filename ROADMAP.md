@@ -19,15 +19,30 @@ Compatible 1.x work should improve reliability, accessibility, ranking quality,
 provider compatibility, observability, and administration without fragmenting
 the command model again.
 
-## 2.x: services beyond the media stack
+## 2.0: private owner foundation
 
-Version 2.x begins when MediaBot deliberately coordinates systems outside its
-current media-provider boundary. Candidate integrations include:
+Version 2.0 begins when MediaBot deliberately coordinates systems outside its
+current media-provider boundary:
+
+- raw thoughts land in an immutable Markdown inbox before anything interprets
+  or promotes them;
+- owner-only torrent intake crosses a deliberately narrow boundary into the
+  existing VPN/quarantine pipeline;
+- household media commands and permissions remain compatible with 1.x.
+
+## Later 2.x: broader integrations
+
+Candidate integrations include:
 
 - Home Assistant intents and household automation;
 - private local AI for conversational routing or richer media understanding;
 - external outage/status services that live outside the homelab failure domain;
 - photo/document search and other user-owned libraries.
+
+Explicit note-to-task promotion into the chosen CalDAV task store and
+calendar/reminder actions come before LLM classification. An LLM may help
+classify or draft those actions later, but it must never be the only copy of a
+capture or create commitments without a visible receipt.
 
 These are not automatic 1.x dependencies. Each integration must be optional,
 least-privileged, independently observable, and safe when either side is

@@ -105,6 +105,25 @@ Optional enrichment for the configured owner profile:
 - never receive ratings from arbitrary household Discord users
 
 
+### Private Life Inbox
+
+Authority for raw owner captures is the append-only Markdown inbox configured
+by `LIFE_CAPTURE_PATH`. MediaBot writes the raw thought atomically before any
+later classification. Nextcloud Notes or another viewer may mirror those
+files, but a mirror is not allowed to become the only copy. Task and calendar
+promotion are separate, explicit workflows; no LLM currently performs either.
+
+
+### Torrent Intake Gateway
+
+MediaBot is not a qBittorrent administrator. Its only torrent capability is a
+token-authenticated `POST` to a two-category intake gateway on an internal
+Docker network. The gateway owns qBittorrent API-key access and must enforce
+the VPN interface, automatic category management, quarantine paths, and scan
+pipeline before acknowledging a BTIH magnet. MediaBot never receives the
+qBittorrent password or API key.
+
+
 ## v0.5 Taste Pipeline
 
 Local MediaBot ratings + Trakt 1-10 ratings + Jellyfin history
@@ -178,6 +197,10 @@ The normal user surface is deliberately small:
 - `$event` creates, nominates, votes, schedules, and shows event-night media.
 - `$new` shows recent additions.
 - `$help` explains this model before exposing utilities.
+
+The hidden `$think` and `$torrent` commands are owner utilities, not household
+product commands. `$torrent` is guild-only so MediaBot can delete the source
+message before validation; if deletion fails, submission fails closed.
 
 `$random` is a compatibility alias for `$discover --random`.
 `$randomrequest` and `$rr` are compatibility aliases for

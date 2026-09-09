@@ -2,8 +2,9 @@
 
 ## Supported versions
 
-Security fixes are applied to the current 0.9.x line. Earlier internal
-milestones are not supported.
+Security fixes are applied to the current 2.x line. The stable 1.x media
+contract remains migration-compatible, but earlier release lines are not
+independently supported.
 
 ## Reporting a vulnerability
 
@@ -24,3 +25,15 @@ infrastructure, not hostile multi-tenant hosting. Keep Discord guild IDs
 allowlisted, protect `.env` as a secret, grant the bot only necessary Discord
 permissions, and keep Seerr, Jellyfin, Sonarr, and SoulSync management APIs on a
 trusted network or behind an authenticated reverse proxy.
+
+The owner-only torrent command must never connect to qBittorrent directly.
+Keep its token-scoped intake gateway on an internal Docker network, reserve a
+dedicated qBittorrent API key for that gateway, and preserve qBittorrent's VPN
+interface binding plus quarantine scanner. Treat a magnet URL as sensitive:
+MediaBot deletes the source message before processing and redacts magnets from
+logs, but deletion is not retroactive disclosure recovery.
+
+Private `$think` captures may contain personal data. Store the Markdown inbox
+on trusted local storage with restrictive permissions, mirror it only into a
+private notes account, and keep raw captures even if later task or calendar
+classification fails.

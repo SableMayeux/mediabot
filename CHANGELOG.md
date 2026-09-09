@@ -5,6 +5,33 @@ All notable changes to Dogginator MediaBot are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses semantic version numbers.
 
+## [2.0.0] - 2026-09-09
+
+### Added
+
+- Added an owner-only `$think`/`$capture` command that atomically preserves raw
+  thoughts as private Markdown before any task classification.
+- Added an owner-only `$torrent movie|tv <magnet>` command backed by a narrow
+  token-authenticated gateway to the existing VPN and quarantine pipeline.
+- Added private-capture and torrent-gateway status to the owner integration
+  health report.
+
+### Security
+
+- Delete torrent command messages before owner validation or intake; a failed
+  deletion fails closed and direct-message intake is rejected.
+- Accept one unambiguous BTIH only, redact complete magnet URLs from logs, and
+  keep qBittorrent credentials outside the MediaBot container.
+- Refuse gateway redirects and prove the mounted intake token against the live
+  gateway with a non-mutating authenticated health probe.
+- Keep both owner utilities hidden from normal help and unavailable to other
+  Discord users.
+
+### Verified
+
+- Added capture durability, magnet parsing, early deletion, deletion-failure,
+  direct-message rejection, hidden-help, and log-redaction regression coverage.
+
 ## [1.1.0] - 2026-09-06
 
 ### Added
