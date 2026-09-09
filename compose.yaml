@@ -21,9 +21,16 @@ services:
 
     environment:
       HOME: /tmp
+      LIFE_CAPTURE_PATH: /life-vault/Life/Inbox
+      TORRENT_INTAKE_URL: http://torrent-intake:8765
+      TORRENT_INTAKE_TOKEN_PATH: /run/secrets/torrent_intake_token
+
+    secrets:
+      - torrent_intake_token
 
     volumes:
       - ./data:/app/data
+      - /opt/stacks/life/vault/Life/Inbox:/life-vault/Life/Inbox
 
     tmpfs:
       - /tmp:size=64m,mode=1777
@@ -40,7 +47,7 @@ services:
         - --path
         - /app/data/runtime-health.json
         - --version
-        - 1.1.0
+        - 2.0.0
         - --max-age
         - "120"
       interval: 30s
@@ -48,8 +55,21 @@ services:
       retries: 3
       start_period: 45s
 
+    networks:
+      - default
+      - torrent_intake
+
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
+
+secrets:
+  torrent_intake_token:
+    file: /opt/stacks/torrent/secrets/torrent_intake_token
+
+networks:
+  torrent_intake:
+    external: true
+    name: dogginator_torrent_intake

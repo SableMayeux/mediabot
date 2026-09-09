@@ -69,6 +69,12 @@ from mediabot.providers.sonarr import (
     SonarrError,
 )
 from mediabot.services.library import LibraryService
+from mediabot.services.life_capture import LifeCaptureError, LifeCaptureService
+from mediabot.services.torrent_intake import (
+    TorrentInputError,
+    TorrentIntakeError,
+    TorrentIntakeService,
+)
 from mediabot.services.discovery import (
     DiscoveryService,
     DiscoveryUsageError,
@@ -117,9 +123,26 @@ DB_PATH = os.environ.get(
     "/app/data/mediabot.db"
 )
 
+LIFE_CAPTURE_PATH = os.environ.get(
+    "LIFE_CAPTURE_PATH",
+    "",
+).strip()
+
+TORRENT_INTAKE_URL = os.environ.get(
+    "TORRENT_INTAKE_URL",
+    "",
+).strip()
+
+TORRENT_INTAKE_TOKEN_PATH = os.environ.get(
+    "TORRENT_INTAKE_TOKEN_PATH",
+    "/run/secrets/torrent_intake_token",
+).strip()
+
 PREFIX = "$"
 
-BOT_VERSION = "1.1.0"
+OWNER_DM_COMMANDS = frozenset({"think"})
+
+BOT_VERSION = "2.0.0"
 
 # discord.py normally wraps non-successful API responses in HTTPException, but
 # aiohttp connection failures can escape directly before Discord returns a
@@ -294,6 +317,11 @@ def _redact_sensitive_text(value):
     text = re.sub(
         r"(?i)(X-Api-Key|Authorization)\s*[:=]\s*\S+",
         r"\1: [REDACTED]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)magnet:\?\S+",
+        "[REDACTED_MAGNET]",
         text,
     )
     return text
@@ -472,7 +500,32 @@ bot = commands.Bot(
 
 @bot.check
 async def enforce_allowed_guild(ctx):
+    command = getattr(ctx, "command", None)
+    command_name = getattr(command, "qualified_name", "")
+
+    # A magnet is effectively a bearer capability. Scrub it before command-level
+    # owner checks or argument handling can reject the invocation and leave the
+    # source message sitting in a public channel.
+    if command_name == "torrent":
+        if ctx.guild is None:
+            raise commands.NoPrivateMessage()
+        deleted = await delete_message_safely(
+            ctx.message,
+            label="sensitive torrent intake command",
+        )
+        if not deleted:
+            raise commands.CheckFailure(
+                "I could not securely remove the magnet message, so nothing was queued."
+            )
+        setattr(ctx, "_torrent_source_deleted", True)
+
     if ctx.guild is None:
+        if (
+            command is not None
+            and command_name in OWNER_DM_COMMANDS
+            and await bot.is_owner(ctx.author)
+        ):
+            return True
         raise commands.NoPrivateMessage()
     if ctx.guild.id in ALLOWED_GUILD_IDS:
         return True
@@ -569,6 +622,15 @@ discovery = DiscoveryService(seerr)
 recommendations = RecommendationService(discovery)
 reports = ReportService(jellyfin)
 transient_ui_store = TransientUIStore(DB_PATH)
+life_capture = (
+    LifeCaptureService(LIFE_CAPTURE_PATH)
+    if LIFE_CAPTURE_PATH
+    else None
+)
+torrent_intake = TorrentIntakeService(
+    base_url=TORRENT_INTAKE_URL,
+    token_path=TORRENT_INTAKE_TOKEN_PATH,
+)
 event_store = EventStore(DB_PATH)
 events = EventService(event_store)
 
@@ -9554,6 +9616,8 @@ COMMAND_USAGE = {
     "event complete": "event complete <event id>",
     "event cancel": "event cancel <event id>",
     "music": "music <artist and track>",
+    "think": "think <anything on your mind>",
+    "torrent": "torrent <movie|tv> <magnet link>",
     "discover": "discover [movie|show] [genres] [--count N] [--top N] [--random]",
     "recommend": "recommend [movie|show] [genres] [--count N] [--top N] [--random]",
     "rate": "rate [title and year] [1-10]",
@@ -9653,6 +9717,7 @@ async def mediabot_help(
     normalized_topic = " ".join((topic or "").split()).casefold()
     permissions = getattr(ctx.author, "guild_permissions", None)
     is_administrator = bool(getattr(permissions, "administrator", False))
+    is_bot_owner = await bot.is_owner(ctx.author)
 
     if normalized_topic and normalized_topic not in {"all", "advanced"}:
         topic = " ".join(
@@ -9674,10 +9739,14 @@ async def mediabot_help(
 
             return
 
-        if (
-            command.qualified_name.split()[0] == "admin"
-            and not is_administrator
-        ):
+        if command.hidden and not is_bot_owner:
+            await ctx.reply(
+                f"No command named `{topic}` exists.\n\n"
+                f"Run `{prefix}help` for the current command tree."
+            )
+            return
+
+        if command.qualified_name.split()[0] == "admin" and not is_administrator:
             await ctx.reply("Administrator commands are not available to this account.")
             return
 
@@ -9765,6 +9834,13 @@ async def mediabot_help(
         ]
         if is_administrator:
             utility_lines.append(f"`{prefix}admin` - administrator tools")
+        if is_bot_owner:
+            utility_lines.extend(
+                [
+                    f"`{prefix}think <text>` - save a private raw capture",
+                    f"`{prefix}torrent <movie|tv> <magnet>` - securely enqueue a magnet",
+                ]
+            )
         embed.add_field(
             name="Utilities",
             value="\n".join(utility_lines),
@@ -9924,6 +10000,119 @@ async def ping(ctx):
     await ctx.reply(
         f"Pong. `{round(bot.latency * 1000)} ms`"
     )
+
+
+@bot.command(
+    name="think",
+    aliases=["capture"],
+    hidden=True,
+    help=(
+        "Save a raw thought immediately to the private Life inbox. "
+        "Only the bot owner can use this command."
+    ),
+)
+@commands.is_owner()
+async def think(ctx, *, thought: str = ""):
+    if life_capture is None:
+        await ctx.reply("The private Life inbox is not configured yet.")
+        return
+
+    if not thought.strip():
+        await ctx.reply(
+            "Usage: `$think <anything on your mind>`\n"
+            "I save the raw thought first; organizing it comes later."
+        )
+        return
+
+    try:
+        capture = await asyncio.to_thread(
+            life_capture.capture,
+            thought,
+            discord_user_id=ctx.author.id,
+            discord_channel_id=getattr(ctx.channel, "id", None),
+            discord_guild_id=getattr(ctx.guild, "id", None),
+        )
+    except LifeCaptureError as exc:
+        await ctx.reply(str(exc))
+        return
+    except Exception as exc:
+        error_id = log_exception("Life inbox capture failed", exc)
+        await ctx.reply(f"I could not save that thought. Error ID: `{error_id}`")
+        return
+
+    confirmation = f"Captured. `{capture.capture_id[:8]}`"
+    if ctx.guild is None:
+        await ctx.reply(confirmation)
+        return
+
+    deleted = await delete_message_safely(
+        ctx.message,
+        label="private life capture command",
+    )
+    if deleted:
+        await ctx.send(confirmation, delete_after=15)
+    else:
+        await ctx.reply(
+            f"{confirmation} I could not remove the original message.",
+            delete_after=30,
+        )
+
+
+@bot.command(
+    name="torrent",
+    hidden=True,
+    help=(
+        "Privately enqueue a movie or TV magnet through the VPN quarantine gate. "
+        "Only the bot owner can use this command."
+    ),
+)
+async def torrent(ctx, category: str = "", *, magnet: str = ""):
+    guild_message = ctx.guild is not None
+    if not guild_message or not getattr(ctx, "_torrent_source_deleted", False):
+        return
+    if not await bot.is_owner(ctx.author):
+        await ctx.send(
+            "That command is restricted to the MediaBot owner.",
+            delete_after=30,
+        )
+        return
+
+    send = ctx.send
+    if not category.strip() or not magnet.strip():
+        await send(
+            "Usage: `$torrent <movie|tv> <magnet link>`",
+            **({"delete_after": 30} if guild_message else {}),
+        )
+        return
+
+    try:
+        result = await torrent_intake.submit(category, magnet)
+    except TorrentInputError as exc:
+        await send(str(exc), **({"delete_after": 30} if guild_message else {}))
+        return
+    except TorrentIntakeError as exc:
+        await send(str(exc), **({"delete_after": 30} if guild_message else {}))
+        return
+    except Exception as exc:
+        error_id = log_exception("Secure torrent intake failed", exc)
+        await send(
+            f"Torrent intake failed. Error ID: `{error_id}`",
+            **({"delete_after": 30} if guild_message else {}),
+        )
+        return
+
+    media_label = "movie" if result.category == "movies" else "TV"
+    if result.duplicate:
+        confirmation = (
+            f"Already loaded as {media_label}. No duplicate was created. "
+            f"Hash: `{result.info_hash[:12]}`"
+        )
+    else:
+        confirmation = (
+            f"Queued as {media_label} behind Proton VPN and the quarantine scanner. "
+            f"Hash: `{result.info_hash[:12]}`"
+        )
+    await send(confirmation, **({"delete_after": 30} if guild_message else {}))
 
 
 async def send_private_output(
@@ -12583,6 +12772,26 @@ async def admin_integrations(
     else:
         lines.append("Sonarr: **NOT CONFIGURED**")
 
+    if life_capture is not None:
+        try:
+            inbox = life_capture.inbox_path
+            if not inbox.is_dir() or not os.access(inbox, os.W_OK):
+                raise RuntimeError("capture inbox is not writable")
+            lines.append("Private capture inbox: **OK**")
+        except Exception as exc:
+            lines.append(f"Private capture inbox: **FAILED** (`{type(exc).__name__}`)")
+    else:
+        lines.append("Private capture inbox: **NOT CONFIGURED**")
+
+    if torrent_intake.enabled:
+        try:
+            await torrent_intake.health()
+            lines.append("VPN torrent intake: **OK**")
+        except Exception as exc:
+            lines.append(f"VPN torrent intake: **FAILED** (`{type(exc).__name__}`)")
+    else:
+        lines.append("VPN torrent intake: **NOT CONFIGURED**")
+
     stats = tracking_stats(discord_guild_id=ctx.guild.id)
     intent_stats = media_request_intent_stats(discord_guild_id=ctx.guild.id)
 
@@ -12913,7 +13122,10 @@ async def on_command_error(
         return
 
     if isinstance(original, commands.CheckFailure):
-        await ctx.reply(str(original) or "That command is not available here.")
+        command = getattr(ctx, "command", None)
+        is_torrent_command = getattr(command, "qualified_name", "") == "torrent"
+        send = ctx.send if is_torrent_command else ctx.reply
+        await send(str(original) or "That command is not available here.")
         return
 
     if isinstance(
@@ -13064,6 +13276,7 @@ async def main():
         await jellyfin.start()
         await soulsync.start()
         await sonarr.start()
+        await torrent_intake.start()
 
         try:
             await seerr.health()
@@ -13105,6 +13318,7 @@ async def main():
                 watcher.cancel()
         if watcher_tasks:
             await asyncio.gather(*watcher_tasks, return_exceptions=True)
+        await torrent_intake.close()
         await sonarr.close()
         await soulsync.close()
         await jellyfin.close()

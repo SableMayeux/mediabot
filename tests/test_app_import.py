@@ -23,7 +23,7 @@ class AppImportTests(unittest.TestCase):
             import app
             from mediabot.providers.seerr import SeerrProvider
 
-            self.assertEqual(app.BOT_VERSION, "1.1.0")
+            self.assertEqual(app.BOT_VERSION, "2.0.0")
             self.assertIsInstance(app.seerr, SeerrProvider)
             self.assertEqual(app.seerr.api_key, "test-key")
             for command_name in ("discover", "recommend", "rate", "report"):
@@ -31,6 +31,8 @@ class AppImportTests(unittest.TestCase):
             self.assertIn("music", {command.name for command in app.bot.commands})
             self.assertIsNone(app.bot.get_command("song"))
             self.assertIsNone(app.bot.get_command("musicstatus"))
+            self.assertTrue(app.bot.get_command("think").hidden)
+            self.assertTrue(app.bot.get_command("torrent").hidden)
             self.assertEqual(app.bot.get_command("rr").name, "recommend")
             self.assertEqual(app.bot.get_command("randomrequest").name, "recommend")
             self.assertEqual(app.bot.get_command("random").name, "discover")

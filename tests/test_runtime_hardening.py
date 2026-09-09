@@ -55,6 +55,134 @@ class RuntimeHardeningTests(unittest.IsolatedAsyncioTestCase):
         finally:
             app.ALLOWED_GUILD_IDS = previous
 
+    async def test_torrent_message_is_deleted_by_global_check_before_callback(self):
+        previous = app.ALLOWED_GUILD_IDS
+        previous_delete = app.delete_message_safely
+        app.ALLOWED_GUILD_IDS = frozenset({10})
+        delete_mock = AsyncMock(return_value=True)
+        app.delete_message_safely = delete_mock
+        ctx = SimpleNamespace(
+            guild=SimpleNamespace(id=10),
+            author=SimpleNamespace(id=12),
+            command=SimpleNamespace(qualified_name="torrent"),
+            message=SimpleNamespace(id=99),
+        )
+        try:
+            self.assertTrue(await app.enforce_allowed_guild(ctx))
+        finally:
+            app.ALLOWED_GUILD_IDS = previous
+            app.delete_message_safely = previous_delete
+
+        delete_mock.assert_awaited_once()
+        self.assertTrue(ctx._torrent_source_deleted)
+
+    async def test_torrent_fails_closed_when_source_cannot_be_deleted(self):
+        previous = app.ALLOWED_GUILD_IDS
+        previous_delete = app.delete_message_safely
+        app.ALLOWED_GUILD_IDS = frozenset({10})
+        delete_mock = AsyncMock(return_value=False)
+        app.delete_message_safely = delete_mock
+        ctx = SimpleNamespace(
+            guild=SimpleNamespace(id=10),
+            author=SimpleNamespace(id=12),
+            command=SimpleNamespace(qualified_name="torrent"),
+            message=SimpleNamespace(id=99),
+        )
+        try:
+            with self.assertRaisesRegex(app.commands.CheckFailure, "nothing was queued"):
+                await app.enforce_allowed_guild(ctx)
+        finally:
+            app.ALLOWED_GUILD_IDS = previous
+            app.delete_message_safely = previous_delete
+
+        delete_mock.assert_awaited_once()
+        self.assertFalse(hasattr(ctx, "_torrent_source_deleted"))
+
+    async def test_torrent_deletion_failure_response_never_references_source(self):
+        ctx = SimpleNamespace(
+            command=SimpleNamespace(qualified_name="torrent"),
+            send=AsyncMock(),
+            reply=AsyncMock(),
+        )
+        error = app.commands.CheckFailure(
+            "I could not securely remove the magnet message, so nothing was queued."
+        )
+
+        await app.on_command_error(ctx, error)
+
+        ctx.send.assert_awaited_once_with(str(error))
+        ctx.reply.assert_not_awaited()
+
+    async def test_torrent_is_not_accepted_in_direct_messages(self):
+        ctx = SimpleNamespace(
+            guild=None,
+            author=SimpleNamespace(id=12),
+            command=SimpleNamespace(qualified_name="torrent"),
+        )
+        with self.assertRaises(app.commands.NoPrivateMessage):
+            await app.enforce_allowed_guild(ctx)
+
+    async def test_deleted_torrent_command_still_rejects_nonowner(self):
+        previous_is_owner = app.bot.is_owner
+        previous_submit = app.torrent_intake.submit
+        app.bot.is_owner = AsyncMock(return_value=False)
+        submit_mock = AsyncMock()
+        app.torrent_intake.submit = submit_mock
+        ctx = SimpleNamespace(
+            guild=SimpleNamespace(id=10),
+            author=SimpleNamespace(id=12),
+            _torrent_source_deleted=True,
+            send=AsyncMock(),
+        )
+        try:
+            await app.torrent.callback(
+                ctx,
+                "movie",
+                magnet="magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            )
+        finally:
+            app.bot.is_owner = previous_is_owner
+            app.torrent_intake.submit = previous_submit
+
+        submit_mock.assert_not_awaited()
+        ctx.send.assert_awaited_once()
+        self.assertIn("restricted", ctx.send.await_args.args[0])
+
+    async def test_owner_utilities_are_hidden_from_nonowner_help(self):
+        previous_is_owner = app.bot.is_owner
+        ctx = SimpleNamespace(
+            author=SimpleNamespace(
+                guild_permissions=SimpleNamespace(administrator=False),
+            ),
+            clean_prefix="$",
+            reply=AsyncMock(),
+        )
+        try:
+            app.bot.is_owner = AsyncMock(return_value=False)
+            await app.mediabot_help.callback(ctx, topic="advanced")
+            nonowner_help = str(ctx.reply.await_args.kwargs["embed"].to_dict())
+            self.assertNotIn("$think", nonowner_help)
+            self.assertNotIn("$torrent", nonowner_help)
+
+            ctx.reply.reset_mock()
+            await app.mediabot_help.callback(ctx, topic="torrent")
+            self.assertIn("No command named", ctx.reply.await_args.args[0])
+
+            ctx.reply.reset_mock()
+            app.bot.is_owner = AsyncMock(return_value=True)
+            await app.mediabot_help.callback(ctx, topic="advanced")
+            owner_help = str(ctx.reply.await_args.kwargs["embed"].to_dict())
+            self.assertIn("$think", owner_help)
+            self.assertIn("$torrent", owner_help)
+        finally:
+            app.bot.is_owner = previous_is_owner
+
+    def test_log_redaction_removes_complete_magnet(self):
+        value = "failure magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=name"
+        redacted = app.redact_log_text(value)
+        self.assertEqual(redacted, "failure [REDACTED_MAGNET]")
+        self.assertNotIn("btih", redacted.casefold())
+
     async def test_semantic_resolver_shares_global_concurrency_and_cache(self):
         class FakeSeerr:
             def __init__(self):
