@@ -122,10 +122,13 @@ class RuntimeHardeningTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(app.commands.NoPrivateMessage):
             await app.enforce_allowed_guild(ctx)
 
-    async def test_deleted_torrent_command_still_rejects_nonowner(self):
+    async def test_deleted_torrent_command_rejects_unlinked_user(self):
         previous_is_owner = app.bot.is_owner
+        previous_get_link = app.get_link
         previous_submit = app.torrent_intake.submit
         app.bot.is_owner = AsyncMock(return_value=False)
+        get_link_mock = Mock(return_value=None)
+        app.get_link = get_link_mock
         submit_mock = AsyncMock()
         app.torrent_intake.submit = submit_mock
         ctx = SimpleNamespace(
@@ -142,16 +145,167 @@ class RuntimeHardeningTests(unittest.IsolatedAsyncioTestCase):
             )
         finally:
             app.bot.is_owner = previous_is_owner
+            app.get_link = previous_get_link
+            app.torrent_intake.submit = previous_submit
+
+        submit_mock.assert_not_awaited()
+        get_link_mock.assert_called_once_with(12)
+        ctx.send.assert_awaited_once()
+        self.assertIn("linked media request account", ctx.send.await_args.args[0])
+
+    async def test_deleted_torrent_command_rejects_unlinked_administrator(self):
+        previous_is_owner = app.bot.is_owner
+        previous_get_link = app.get_link
+        previous_submit = app.torrent_intake.submit
+        app.bot.is_owner = AsyncMock(return_value=False)
+        app.get_link = Mock(return_value=None)
+        submit_mock = AsyncMock()
+        app.torrent_intake.submit = submit_mock
+        ctx = SimpleNamespace(
+            guild=SimpleNamespace(id=10),
+            author=SimpleNamespace(
+                id=13,
+                guild_permissions=SimpleNamespace(administrator=True),
+            ),
+            _torrent_source_deleted=True,
+            send=AsyncMock(),
+        )
+        try:
+            await app.torrent.callback(
+                ctx,
+                "movie",
+                magnet="magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            )
+        finally:
+            app.bot.is_owner = previous_is_owner
+            app.get_link = previous_get_link
             app.torrent_intake.submit = previous_submit
 
         submit_mock.assert_not_awaited()
         ctx.send.assert_awaited_once()
-        self.assertIn("restricted", ctx.send.await_args.args[0])
+        self.assertIn("linked media request account", ctx.send.await_args.args[0])
 
-    async def test_owner_utilities_are_hidden_from_nonowner_help(self):
+    async def test_linked_user_can_submit_torrent_without_magnet_disclosure(self):
         previous_is_owner = app.bot.is_owner
+        previous_get_link = app.get_link
+        previous_submit = app.torrent_intake.submit
+        app.bot.is_owner = AsyncMock(return_value=False)
+        app.get_link = Mock(
+            return_value={"seerr_user_id": 42, "seerr_username": "linked-user"}
+        )
+        submit_mock = AsyncMock(
+            return_value=SimpleNamespace(
+                category="movies",
+                duplicate=False,
+                info_hash="0123456789abcdef0123456789abcdef01234567",
+            )
+        )
+        app.torrent_intake.submit = submit_mock
+        magnet = (
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
+            "&dn=private-release-name"
+        )
+        ctx = SimpleNamespace(
+            guild=SimpleNamespace(id=10),
+            author=SimpleNamespace(
+                id=14,
+                guild_permissions=SimpleNamespace(administrator=False),
+            ),
+            _torrent_source_deleted=True,
+            send=AsyncMock(),
+        )
+        try:
+            await app.torrent.callback(ctx, "movie", magnet=magnet)
+        finally:
+            app.bot.is_owner = previous_is_owner
+            app.get_link = previous_get_link
+            app.torrent_intake.submit = previous_submit
+
+        submit_mock.assert_awaited_once_with("movie", magnet)
+        response = ctx.send.await_args.args[0]
+        self.assertNotIn("magnet:?", response)
+        self.assertNotIn("private-release-name", response)
+        self.assertIn("0123456789ab", response)
+
+    async def test_linked_administrator_can_submit_torrent(self):
+        previous_is_owner = app.bot.is_owner
+        previous_get_link = app.get_link
+        previous_submit = app.torrent_intake.submit
+        app.bot.is_owner = AsyncMock(return_value=False)
+        app.get_link = Mock(
+            return_value={"seerr_user_id": 43, "seerr_username": "linked-admin"}
+        )
+        submit_mock = AsyncMock(
+            return_value=SimpleNamespace(
+                category="tv",
+                duplicate=True,
+                info_hash="0123456789abcdef0123456789abcdef01234567",
+            )
+        )
+        app.torrent_intake.submit = submit_mock
+        ctx = SimpleNamespace(
+            guild=SimpleNamespace(id=10),
+            author=SimpleNamespace(
+                id=15,
+                guild_permissions=SimpleNamespace(administrator=True),
+            ),
+            _torrent_source_deleted=True,
+            send=AsyncMock(),
+        )
+        try:
+            await app.torrent.callback(
+                ctx,
+                "tv",
+                magnet="magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            )
+        finally:
+            app.bot.is_owner = previous_is_owner
+            app.get_link = previous_get_link
+            app.torrent_intake.submit = previous_submit
+
+        submit_mock.assert_awaited_once()
+        self.assertIn("Already loaded as TV", ctx.send.await_args.args[0])
+
+    async def test_owner_can_submit_torrent_without_link_lookup(self):
+        previous_is_owner = app.bot.is_owner
+        previous_get_link = app.get_link
+        previous_submit = app.torrent_intake.submit
+        app.bot.is_owner = AsyncMock(return_value=True)
+        app.get_link = Mock(side_effect=AssertionError("owner must bypass link lookup"))
+        submit_mock = AsyncMock(
+            return_value=SimpleNamespace(
+                category="movies",
+                duplicate=False,
+                info_hash="0123456789abcdef0123456789abcdef01234567",
+            )
+        )
+        app.torrent_intake.submit = submit_mock
+        ctx = SimpleNamespace(
+            guild=SimpleNamespace(id=10),
+            author=SimpleNamespace(id=16),
+            _torrent_source_deleted=True,
+            send=AsyncMock(),
+        )
+        try:
+            await app.torrent.callback(
+                ctx,
+                "movie",
+                magnet="magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            )
+        finally:
+            app.bot.is_owner = previous_is_owner
+            app.get_link = previous_get_link
+            app.torrent_intake.submit = previous_submit
+
+        submit_mock.assert_awaited_once()
+        ctx.send.assert_awaited_once()
+
+    async def test_sensitive_utility_help_matches_account_authorization(self):
+        previous_is_owner = app.bot.is_owner
+        previous_get_link = app.get_link
         ctx = SimpleNamespace(
             author=SimpleNamespace(
+                id=12,
                 guild_permissions=SimpleNamespace(administrator=False),
             ),
             clean_prefix="$",
@@ -159,6 +313,7 @@ class RuntimeHardeningTests(unittest.IsolatedAsyncioTestCase):
         )
         try:
             app.bot.is_owner = AsyncMock(return_value=False)
+            app.get_link = Mock(return_value=None)
             await app.mediabot_help.callback(ctx, topic="advanced")
             nonowner_help = str(ctx.reply.await_args.kwargs["embed"].to_dict())
             self.assertNotIn("$think", nonowner_help)
@@ -169,13 +324,39 @@ class RuntimeHardeningTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("No command named", ctx.reply.await_args.args[0])
 
             ctx.reply.reset_mock()
+            app.get_link = Mock(
+                return_value={"seerr_user_id": 42, "seerr_username": "linked-user"}
+            )
+            await app.mediabot_help.callback(ctx, topic="advanced")
+            linked_help = str(ctx.reply.await_args.kwargs["embed"].to_dict())
+            self.assertNotIn("$think", linked_help)
+            self.assertIn("$torrent", linked_help)
+
+            ctx.reply.reset_mock()
+            await app.mediabot_help.callback(ctx, topic="torrent")
+            direct_help = str(ctx.reply.await_args.kwargs["embed"].to_dict())
+            self.assertIn("Requires a linked media request account", direct_help)
+
+            ctx.reply.reset_mock()
+            await app.mediabot_help.callback(ctx, topic=None)
+            normal_help = str(ctx.reply.await_args.kwargs["embed"].to_dict())
+            self.assertNotIn("$torrent", normal_help)
+
+            ctx.reply.reset_mock()
+            await app.mediabot_help.callback(ctx, topic="all")
+            complete_help = str(ctx.reply.await_args.kwargs["embed"].to_dict())
+            self.assertNotIn("$torrent", complete_help)
+
+            ctx.reply.reset_mock()
             app.bot.is_owner = AsyncMock(return_value=True)
+            app.get_link = Mock(side_effect=AssertionError("owner must bypass link lookup"))
             await app.mediabot_help.callback(ctx, topic="advanced")
             owner_help = str(ctx.reply.await_args.kwargs["embed"].to_dict())
             self.assertIn("$think", owner_help)
             self.assertIn("$torrent", owner_help)
         finally:
             app.bot.is_owner = previous_is_owner
+            app.get_link = previous_get_link
 
     def test_log_redaction_removes_complete_magnet(self):
         value = "failure magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=name"

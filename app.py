@@ -74,6 +74,8 @@ from mediabot.services.torrent_intake import (
     TorrentInputError,
     TorrentIntakeError,
     TorrentIntakeService,
+    torrent_category_label,
+    torrent_category_requires_manual_review,
 )
 from mediabot.services.discovery import (
     DiscoveryService,
@@ -9617,7 +9619,7 @@ COMMAND_USAGE = {
     "event cancel": "event cancel <event id>",
     "music": "music <artist and track>",
     "think": "think <anything on your mind>",
-    "torrent": "torrent <movie|tv> <magnet link>",
+    "torrent": "torrent <movie|tv|music|game|app|other> <magnet link>",
     "discover": "discover [movie|show] [genres] [--count N] [--top N] [--random]",
     "recommend": "recommend [movie|show] [genres] [--count N] [--top N] [--random]",
     "rate": "rate [title and year] [1-10]",
@@ -9718,6 +9720,9 @@ async def mediabot_help(
     permissions = getattr(ctx.author, "guild_permissions", None)
     is_administrator = bool(getattr(permissions, "administrator", False))
     is_bot_owner = await bot.is_owner(ctx.author)
+    can_use_torrent = is_bot_owner
+    if not can_use_torrent and normalized_topic in {"advanced", "torrent"}:
+        can_use_torrent = bool(get_link(ctx.author.id))
 
     if normalized_topic and normalized_topic not in {"all", "advanced"}:
         topic = " ".join(
@@ -9739,7 +9744,11 @@ async def mediabot_help(
 
             return
 
-        if command.hidden and not is_bot_owner:
+        hidden_command_available = (
+            is_bot_owner
+            or (command.qualified_name == "torrent" and can_use_torrent)
+        )
+        if command.hidden and not hidden_command_available:
             await ctx.reply(
                 f"No command named `{topic}` exists.\n\n"
                 f"Run `{prefix}help` for the current command tree."
@@ -9835,11 +9844,12 @@ async def mediabot_help(
         if is_administrator:
             utility_lines.append(f"`{prefix}admin` - administrator tools")
         if is_bot_owner:
-            utility_lines.extend(
-                [
-                    f"`{prefix}think <text>` - save a private raw capture",
-                    f"`{prefix}torrent <movie|tv> <magnet>` - securely enqueue a magnet",
-                ]
+            utility_lines.append(
+                f"`{prefix}think <text>` - save a private raw capture"
+            )
+        if can_use_torrent:
+            utility_lines.append(
+                f"`{prefix}torrent <type> <magnet>` - securely enqueue a magnet"
             )
         embed.add_field(
             name="Utilities",
@@ -10062,17 +10072,20 @@ async def think(ctx, *, thought: str = ""):
     name="torrent",
     hidden=True,
     help=(
-        "Privately enqueue a movie or TV magnet through the VPN quarantine gate. "
-        "Only the bot owner can use this command."
+        "Privately enqueue a movie, TV, music, game, application, or other magnet "
+        "through the VPN quarantine gate. Games, applications, and other payloads "
+        "stay stopped for manual review. Requires a linked media request account."
     ),
 )
 async def torrent(ctx, category: str = "", *, magnet: str = ""):
     guild_message = ctx.guild is not None
     if not guild_message or not getattr(ctx, "_torrent_source_deleted", False):
         return
-    if not await bot.is_owner(ctx.author):
+    is_owner = await bot.is_owner(ctx.author)
+    if not is_owner and not get_link(ctx.author.id):
         await ctx.send(
-            "That command is restricted to the MediaBot owner.",
+            "That command requires a linked media request account. "
+            "Ask an administrator to link your Discord and Seerr accounts.",
             delete_after=30,
         )
         return
@@ -10080,7 +10093,7 @@ async def torrent(ctx, category: str = "", *, magnet: str = ""):
     send = ctx.send
     if not category.strip() or not magnet.strip():
         await send(
-            "Usage: `$torrent <movie|tv> <magnet link>`",
+            "Usage: `$torrent <movie|tv|music|game|app|other> <magnet link>`",
             **({"delete_after": 30} if guild_message else {}),
         )
         return
@@ -10101,11 +10114,25 @@ async def torrent(ctx, category: str = "", *, magnet: str = ""):
         )
         return
 
-    media_label = "movie" if result.category == "movies" else "TV"
+    media_label = torrent_category_label(result.category)
     if result.duplicate:
+        if torrent_category_requires_manual_review(result.category):
+            confirmation = (
+                f"Already loaded as {media_label}, pending owner review in "
+                "manual quarantine. "
+                f"No duplicate was created. Hash: `{result.info_hash[:12]}`"
+            )
+        else:
+            confirmation = (
+                f"Already loaded as {media_label}. No duplicate was created. "
+                f"Hash: `{result.info_hash[:12]}`"
+            )
+    elif torrent_category_requires_manual_review(result.category):
         confirmation = (
-            f"Already loaded as {media_label}. No duplicate was created. "
-            f"Hash: `{result.info_hash[:12]}`"
+            f"Loaded as {media_label} behind Proton VPN, stopped in manual quarantine "
+            "pending owner review. The owner can inspect its manifest in qBittorrent, "
+            "but manual-review payloads cannot be started until download storage "
+            f"isolation is enabled. Hash: `{result.info_hash[:12]}`"
         )
     else:
         confirmation = (

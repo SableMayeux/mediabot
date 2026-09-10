@@ -117,11 +117,15 @@ promotion are separate, explicit workflows; no LLM currently performs either.
 ### Torrent Intake Gateway
 
 MediaBot is not a qBittorrent administrator. Its only torrent capability is a
-token-authenticated `POST` to a two-category intake gateway on an internal
+token-authenticated `POST` to a fixed-category intake gateway on an internal
 Docker network. The gateway owns qBittorrent API-key access and must enforce
-the VPN interface, automatic category management, quarantine paths, and scan
-pipeline before acknowledging a BTIH magnet. MediaBot never receives the
-qBittorrent password or API key.
+the VPN interface, automatic category management, and caller-independent
+quarantine paths before acknowledging a BTIH magnet. Movies, TV, and music use
+scanner-managed routes. Games, applications, and other payloads receive a
+manual-review tag and remain stopped in isolated quarantine; those routes
+never feed Starr automation. Starting a manual route is fail-closed until its
+backing mount and completed-payload review workflow are hardened separately.
+MediaBot never receives the qBittorrent password or API key.
 
 
 ## v0.5 Taste Pipeline
@@ -198,9 +202,18 @@ The normal user surface is deliberately small:
 - `$new` shows recent additions.
 - `$help` explains this model before exposing utilities.
 
-The hidden `$think` and `$torrent` commands are owner utilities, not household
-product commands. `$torrent` is guild-only so MediaBot can delete the source
-message before validation; if deletion fails, submission fails closed.
+The hidden `$think` command remains an owner utility. `$torrent` is available
+to the owner and Discord users with an administrator-verified Seerr media link,
+but remains outside the normal household command surface. It is guild-only so
+MediaBot can delete the source message before account or input validation; if
+deletion fails, submission fails closed.
+
+`$torrent` requires a type because each accepted alias resolves to one of six
+canonical routing classes: `movies`, `tv`, `music`, `games`, `applications`,
+or `other`. The user cannot provide a save path. The first three are inert
+media routes; the last three are explicit manual-review routes for payloads
+that may legitimately contain code or archives. The music route has no current
+Navidrome importer, so SoulSync remains the automatic song-acquisition path.
 
 `$random` is a compatibility alias for `$discover --random`.
 `$randomrequest` and `$rr` are compatibility aliases for

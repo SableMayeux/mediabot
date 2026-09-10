@@ -5,6 +5,18 @@ All notable changes to Dogginator MediaBot are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses semantic version numbers.
 
+## [Unreleased]
+
+### Changed
+
+- Allow Discord users with an administrator-verified Seerr media link to use
+  the guarded `$torrent` intake command; the bot owner retains access.
+
+### Security
+
+- Keep torrent intake hidden from normal help, guild-only, and fail-closed on
+  source deletion before linked-account or input validation.
+
 ## [2.0.0] - 2026-09-09
 
 ### Added

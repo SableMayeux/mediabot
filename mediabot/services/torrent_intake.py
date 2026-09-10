@@ -36,13 +36,42 @@ class TorrentIntakeResult:
 
 
 _CATEGORY_ALIASES = {
+    "app": "applications",
+    "application": "applications",
+    "applications": "applications",
+    "apps": "applications",
+    "album": "music",
+    "albums": "music",
+    "audio": "music",
+    "film": "movies",
+    "game": "games",
+    "games": "games",
+    "misc": "other",
     "movie": "movies",
     "movies": "movies",
+    "music": "music",
+    "other": "other",
+    "program": "applications",
+    "programs": "applications",
+    "song": "music",
+    "songs": "music",
+    "software": "applications",
     "show": "tv",
     "shows": "tv",
     "series": "tv",
     "tv": "tv",
 }
+
+_CATEGORY_LABELS = {
+    "applications": "application",
+    "games": "game",
+    "movies": "movie",
+    "music": "music",
+    "other": "other",
+    "tv": "TV",
+}
+
+_MANUAL_REVIEW_CATEGORIES = frozenset({"applications", "games", "other"})
 
 
 def normalize_torrent_category(value: str) -> str:
@@ -50,7 +79,25 @@ def normalize_torrent_category(value: str) -> str:
     try:
         return _CATEGORY_ALIASES[normalized]
     except KeyError as exc:
-        raise TorrentInputError("Choose `movie` or `tv` before the magnet link.") from exc
+        raise TorrentInputError(
+            "Choose `movie`, `tv`, `music`, `game`, `app`, or `other` "
+            "before the magnet link."
+        ) from exc
+
+
+def torrent_category_label(category: str) -> str:
+    """Return a safe display label for one canonical gateway category."""
+
+    try:
+        return _CATEGORY_LABELS[str(category)]
+    except KeyError as exc:
+        raise TorrentInputError("The torrent gateway returned an unknown category.") from exc
+
+
+def torrent_category_requires_manual_review(category: str) -> bool:
+    """Whether intake must remain stopped in isolated manual quarantine."""
+
+    return str(category) in _MANUAL_REVIEW_CATEGORIES
 
 
 def parse_magnet_reference(value: str) -> MagnetReference:

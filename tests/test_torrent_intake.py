@@ -9,6 +9,8 @@ from mediabot.services.torrent_intake import (
     TorrentIntakeService,
     normalize_torrent_category,
     parse_magnet_reference,
+    torrent_category_label,
+    torrent_category_requires_manual_review,
 )
 
 
@@ -47,11 +49,33 @@ class FakeSession:
 class TorrentInputTests(unittest.TestCase):
     HASH = "0123456789abcdef0123456789abcdef01234567"
 
-    def test_normalizes_only_media_categories(self):
-        self.assertEqual(normalize_torrent_category("movie"), "movies")
-        self.assertEqual(normalize_torrent_category("series"), "tv")
+    def test_normalizes_fixed_category_aliases(self):
+        expected = {
+            "movie": "movies",
+            "film": "movies",
+            "series": "tv",
+            "song": "music",
+            "album": "music",
+            "game": "games",
+            "software": "applications",
+            "app": "applications",
+            "misc": "other",
+        }
+        for supplied, canonical in expected.items():
+            with self.subTest(supplied=supplied):
+                self.assertEqual(normalize_torrent_category(supplied), canonical)
         with self.assertRaises(TorrentInputError):
-            normalize_torrent_category("software")
+            normalize_torrent_category("../../escape")
+
+    def test_manual_review_categories_are_explicit(self):
+        for category in ("applications", "games", "other"):
+            with self.subTest(category=category):
+                self.assertTrue(torrent_category_requires_manual_review(category))
+        for category in ("movies", "tv", "music"):
+            with self.subTest(category=category):
+                self.assertFalse(torrent_category_requires_manual_review(category))
+        self.assertEqual(torrent_category_label("applications"), "application")
+        self.assertEqual(torrent_category_label("tv"), "TV")
 
     def test_parses_hex_and_base32_btih(self):
         self.assertEqual(

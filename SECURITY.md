@@ -26,12 +26,22 @@ allowlisted, protect `.env` as a secret, grant the bot only necessary Discord
 permissions, and keep Seerr, Jellyfin, Sonarr, and SoulSync management APIs on a
 trusted network or behind an authenticated reverse proxy.
 
-The owner-only torrent command must never connect to qBittorrent directly.
+The torrent command is limited to the bot owner and Discord accounts explicitly
+linked to a Seerr media identity. It must never connect to qBittorrent directly.
 Keep its token-scoped intake gateway on an internal Docker network, reserve a
 dedicated qBittorrent API key for that gateway, and preserve qBittorrent's VPN
 interface binding plus quarantine scanner. Treat a magnet URL as sensitive:
-MediaBot deletes the source message before processing and redacts magnets from
-logs, but deletion is not retroactive disclosure recovery.
+MediaBot deletes the source message before account validation or processing and
+redacts magnets from logs, but deletion is not retroactive disclosure recovery.
+
+Torrent types are a fixed allowlist. Movies, TV, and music may pass their
+media-only scanner; games, applications, and other payloads must stay stopped
+under isolated manual-review quarantine. The guard blocks starting them until
+the backing mount has a verified non-executable isolation policy and a
+dedicated completed-payload scan/release workflow. Manual-review routes never
+feed Radarr, Sonarr, or an automatic
+software importer. They are not a claim that executable content is safe, and
+the stack neither auto-executes nor auto-deletes it.
 
 Private `$think` captures may contain personal data. Store the Markdown inbox
 on trusted local storage with restrictive permissions, mirror it only into a

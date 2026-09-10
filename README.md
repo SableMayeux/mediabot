@@ -31,9 +31,13 @@ household commands into an administration console. See [ROADMAP.md](ROADMAP.md).
 - Gives the bot owner a durable `$think` inbox for raw Markdown captures. A
   thought is always saved before any future classification; it is not silently
   promoted into a task.
-- Gives the bot owner a narrow `$torrent movie|tv <magnet>` intake path that
-  removes the Discord source message before submission and can reach only the
-  VPN/quarantine gateway, never qBittorrent's administrative API.
+- Gives verified Discord accounts linked to a Seerr media identity a narrow
+  `$torrent <type> <magnet>` intake path for movies, TV, music, games,
+  applications, and other payloads. It removes the Discord source
+  message before submission and can reach only the VPN/quarantine gateway,
+  never qBittorrent's administrative API. The bot owner retains access without
+  needing a separate link. Games, applications, and other payloads remain
+  stopped in isolated manual-review quarantine.
 
 MediaBot is deliberately not a replacement for Seerr, Jellyfin, Sonarr,
 Radarr, or SoulSync. The detailed provider boundaries and request lifecycles
@@ -67,11 +71,22 @@ The default prefix is `$`.
 | `$new [count]` | Show recently added Jellyfin media. |
 | `$help [command]` | Show the current user-facing command model and generated details. |
 
-Two hidden owner utilities are intentionally omitted from normal help:
-`$think <text>` (alias `$capture`) writes a private raw note, while
-`$torrent <movie|tv> <magnet>` accepts one BTIH magnet in the configured Media
-Discord. The latter is unavailable in DMs because MediaBot cannot delete the
-user's DM source; if guild-message deletion fails, nothing is queued.
+Two sensitive utilities are intentionally omitted from normal help:
+`$think <text>` (alias `$capture`) is owner-only and writes a private raw note,
+while `$torrent <movie|tv|music|game|app|other> <magnet>` accepts one BTIH magnet from the owner or a
+Discord account explicitly linked to a Seerr media identity. Torrent intake is
+available only in the configured Media Discord because MediaBot cannot delete
+the user's DM source; if guild-message deletion fails, nothing is queued.
+
+The required type is routing and safety metadata, not a free-form tag. Movie,
+TV, and music aliases enter fixed scanner-managed paths. `game`/`games`,
+`app`/`application`/`software`, and `other` enter fixed manual-review paths and
+stay stopped for owner review. Starting those routes is intentionally blocked
+until the backing mount has verified non-executable isolation and a dedicated
+completed-payload scan/release policy. The music
+route validates audio and seeds the result, but no current importer moves it
+into the Navidrome library; `$music` through SoulSync remains the automatic
+song-request path.
 
 `$random` remains a compatibility alias for `$discover --random`.
 `$randomrequest` and `$rr` alias `$recommend --random`; `$ratings` aliases

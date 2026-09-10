@@ -26,8 +26,8 @@ current media-provider boundary:
 
 - raw thoughts land in an immutable Markdown inbox before anything interprets
   or promotes them;
-- owner-only torrent intake crosses a deliberately narrow boundary into the
-  existing VPN/quarantine pipeline;
+- torrent intake for the owner and administrator-linked media accounts crosses
+  a deliberately narrow boundary into the existing VPN/quarantine pipeline;
 - household media commands and permissions remain compatible with 1.x.
 
 ## Later 2.x: broader integrations
