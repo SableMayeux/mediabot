@@ -116,15 +116,22 @@ promotion are separate, explicit workflows; no LLM currently performs either.
 
 ### Torrent Intake Gateway
 
-MediaBot is not a qBittorrent administrator. Its only torrent capability is a
-token-authenticated `POST` to a fixed-category intake gateway on an internal
+MediaBot is not a qBittorrent administrator. Its torrent capabilities are
+token-authenticated fixed intake and review operations on an internal
 Docker network. The gateway owns qBittorrent API-key access and must enforce
 the VPN interface, automatic category management, and caller-independent
 quarantine paths before acknowledging a BTIH magnet. Movies, TV, and music use
 scanner-managed routes. Games, applications, and other payloads receive a
-manual-review tag and remain stopped in isolated quarantine; those routes
-never feed Starr automation. Starting a manual route is fail-closed until its
-backing mount and completed-payload review workflow are hardened separately.
+manual-review tag and remain stopped in quarantine; those routes never feed
+Starr automation. Private Discord views recheck owner/admin permissions on
+every action and bind the session to the opening actor and guild. The intake
+gateway proxies only fixed review routes to a separate capless root service
+using a credential unavailable to MediaBot. Root-owned receipts bind the
+current hash, category, path, added-on time, manifest digest, and selected indexes.
+Explicit approval is required; recovering a recorded approval-lifecycle hold
+requires the configured owner and never starts a download. Unknown holds and
+failed scan results remain blocked. Scanner coverage is bounded and partial
+results are reported honestly. Manual quarantine is not an execution sandbox.
 MediaBot never receives the qBittorrent password or API key.
 
 

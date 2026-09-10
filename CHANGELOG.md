@@ -7,6 +7,20 @@ and this project uses semantic version numbers.
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-09-10
+
+### Added
+
+- Private owner/admin torrent review with file selection, scan limits, metadata
+  progress, cancel/retry, and separate evidence-gated owner hold recovery.
+- A fixed review client behind the existing intake boundary, keeping qBittorrent
+  credentials and approval receipts out of MediaBot.
+
+### Fixed
+
+- Keep successful torrent intake receipts and remove the stale instruction that
+  routine approval requires inspecting qBittorrent manually.
+
 ## [2.1.3] - 2026-09-10
 
 ### Fixed

@@ -47,7 +47,9 @@ class TorrentCategoryCommandTests(unittest.IsolatedAsyncioTestCase):
 
         response = ctx.send.await_args.args[0]
         self.assertIn("stopped in manual quarantine pending owner review", response)
-        self.assertIn("cannot be started", response)
+        self.assertIn("Review privately", response)
+        self.assertIn("view", ctx.send.await_args.kwargs)
+        self.assertNotIn("delete_after", ctx.send.await_args.kwargs)
         self.assertNotIn("private-installer-name", response)
         self.assertIn("0123456789ab", response)
 

@@ -70,6 +70,7 @@ from mediabot.providers.sonarr import (
 )
 from mediabot.services.library import LibraryService
 from mediabot.services.life_capture import LifeCaptureError, LifeCaptureService
+from mediabot.ui.torrent_review import TorrentReviewLauncher, review_role
 from mediabot.services.torrent_intake import (
     TorrentInputError,
     TorrentIntakeError,
@@ -144,7 +145,7 @@ PREFIX = "$"
 
 OWNER_DM_COMMANDS = frozenset({"think"})
 
-BOT_VERSION = "2.1.3"
+BOT_VERSION = "2.2.0"
 
 # discord.py normally wraps non-successful API responses in HTTPException, but
 # aiohttp connection failures can escape directly before Discord returns a
@@ -9720,7 +9721,7 @@ async def mediabot_help(
     permissions = getattr(ctx.author, "guild_permissions", None)
     is_administrator = bool(getattr(permissions, "administrator", False))
     is_bot_owner = await bot.is_owner(ctx.author)
-    can_use_torrent = is_bot_owner
+    can_use_torrent = is_bot_owner or is_administrator
     if not can_use_torrent and normalized_topic in {"advanced", "torrent"}:
         can_use_torrent = bool(get_link(ctx.author.id))
 
@@ -9851,6 +9852,8 @@ async def mediabot_help(
             utility_lines.append(
                 f"`{prefix}torrent <type> <magnet>` - securely enqueue a magnet"
             )
+            if is_bot_owner or is_administrator:
+                utility_lines.append(f"`{prefix}torrent review` - privately review and approve selected files")
         embed.add_field(
             name="Utilities",
             value="\n".join(utility_lines),
@@ -10074,12 +10077,22 @@ async def think(ctx, *, thought: str = ""):
     help=(
         "Privately enqueue a movie, TV, music, game, application, or other magnet "
         "through the VPN quarantine gate. Games, applications, and other payloads "
-        "stay stopped for manual review. Requires a linked media request account."
+        "stay stopped for manual review. Use `$torrent review` for private owner/admin "
+        "file selection, approval, progress, and recovery. Requires a linked media request account for intake."
     ),
 )
 async def torrent(ctx, category: str = "", *, magnet: str = ""):
     guild_message = ctx.guild is not None
     if not guild_message or not getattr(ctx, "_torrent_source_deleted", False):
+        return
+    if category.strip().casefold() == "review" and not magnet.strip():
+        if await review_role(bot, ctx.author) is None:
+            await ctx.send("An owner or administrator must review downloads.", delete_after=30)
+            return
+        view = TorrentReviewLauncher(bot=bot, service=torrent_intake, guild_id=ctx.guild.id)
+        message = await ctx.send("Open the private torrent review queue.", view=view)
+        view.message = message
+        register_transient_card(message=message, command_message=None, kind="torrent-review")
         return
     is_owner = await bot.is_owner(ctx.author)
     if not is_owner and not get_link(ctx.author.id):
@@ -10093,7 +10106,8 @@ async def torrent(ctx, category: str = "", *, magnet: str = ""):
     send = ctx.send
     if not category.strip() or not magnet.strip():
         await send(
-            "Usage: `$torrent <movie|tv|music|game|app|other> <magnet link>`",
+            "Usage: `$torrent <movie|tv|music|game|app|other> <magnet link>`\n"
+            "Owner/admin review: `$torrent review`",
             **({"delete_after": 30} if guild_message else {}),
         )
         return
@@ -10130,16 +10144,22 @@ async def torrent(ctx, category: str = "", *, magnet: str = ""):
     elif torrent_category_requires_manual_review(result.category):
         confirmation = (
             f"Loaded as {media_label} behind Proton VPN, stopped in manual quarantine "
-            "pending owner review. The owner can inspect its manifest in qBittorrent, "
-            "but manual-review payloads cannot be started until download storage "
-            f"isolation is enabled. Hash: `{result.info_hash[:12]}`"
+            "pending owner review. Use Review privately to inspect files and scan limits "
+            "before approving the selected download. "
+            f"Hash: `{result.info_hash[:12]}`"
         )
     else:
         confirmation = (
             f"Queued as {media_label} behind Proton VPN and the quarantine scanner. "
             f"Hash: `{result.info_hash[:12]}`"
         )
-    await send(confirmation, **({"delete_after": 30} if guild_message else {}))
+    if torrent_category_requires_manual_review(result.category):
+        view = TorrentReviewLauncher(
+            bot=bot, service=torrent_intake, guild_id=ctx.guild.id, info_hash=result.info_hash,
+        )
+        view.message = await send(confirmation, view=view)
+    else:
+        await send(confirmation)
 
 
 async def send_private_output(

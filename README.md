@@ -5,7 +5,7 @@ stack. It gives household users one small, consistent command surface while
 leaving media search, approval, acquisition, and playback with the services
 that already own those jobs.
 
-Current source version: **2.1.3**
+Current source version: **2.2.0**
 
 The 1.x household-media command model remains a compatibility contract. The
 2.x line adds private and guarded workflows around that stable core without
@@ -38,7 +38,9 @@ turning household commands into an administration console. See
   message before submission and can reach only the VPN/quarantine gateway,
   never qBittorrent's administrative API. The bot owner retains access without
   needing a separate link. Games, applications, and other payloads remain
-  stopped in isolated manual-review quarantine.
+  stopped in manual-review quarantine until explicit owner/admin approval.
+  `$torrent review` opens private file selection, bounded metadata progress,
+  cancel/retry, scan coverage, and evidence-gated owner hold recovery.
 
 MediaBot is deliberately not a replacement for Seerr, Jellyfin, Sonarr,
 Radarr, or SoulSync. The detailed provider boundaries and request lifecycles
@@ -82,9 +84,23 @@ the user's DM source; if guild-message deletion fails, nothing is queued.
 The required type is routing and safety metadata, not a free-form tag. Movie,
 TV, and music aliases enter fixed scanner-managed paths. `game`/`games`,
 `app`/`application`/`software`, and `other` enter fixed manual-review paths and
-stay stopped for owner review. Starting those routes is intentionally blocked
-until the backing mount has verified non-executable isolation and a dedicated
-completed-payload scan/release policy. The music
+stay stopped for owner/admin review. Use **Review privately** on the intake
+receipt or `$torrent review`, choose a request, inspect its manifest and scan
+coverage, select files, then choose **Approve selected download**. Metadata
+acquisition has a bounded temporary permit and displays progress. **Cancel
+review** stops metadata acquisition; it does not delete payloads. **Recover
+hold** is a separate owner-only action available only for a recorded,
+validated approval-lifecycle hold; recovery never starts the download.
+
+Completed manual payloads stop for scanning. Selected files over the configured
+95 MiB ceiling are skipped and reported as unscanned; archive coverage has
+additional limits. Partial scans can permit seeding in manual quarantine,
+which is separate from automatic import and does not establish safe execution.
+The current quarantine mount does not enforce `noexec`. Approval and scan
+receipts remain in the root-owned review service; the bot receives no qBit
+credential. Refresh the private review to see download, scan, and seeding state.
+Successful intake receipts remain; abandoned queue launchers expire after five
+minutes. The music
 route validates audio and seeds the result, but no current importer moves it
 into the Navidrome library; `$music` through SoulSync remains the automatic
 song-request path.
@@ -248,8 +264,8 @@ The repository uses the standard library `unittest` runner:
 python -m pip check
 python -m compileall -q app.py mediabot scripts tests
 python -m unittest discover -s tests -q
-test -x scripts/deploy_v213.sh
-sh -n scripts/deploy_v213.sh
+test -x scripts/deploy_v220.sh
+sh -n scripts/deploy_v220.sh
 ```
 
 The GitHub Actions workflow runs the same dependency, compilation, deployer
@@ -257,7 +273,7 @@ syntax, and full unit-test gates on Python 3.13.
 
 ## Deployment note
 
-`scripts/deploy_v213.sh` is a guarded, transactional deployer for the current
+`scripts/deploy_v220.sh` is a guarded, transactional deployer for the current
 Compose layout. It backs up the runtime and SQLite database, verifies hashes
 and database integrity, performs security and health gates, and rolls back on
 failure. It is intentionally opinionated: audit its target paths, service

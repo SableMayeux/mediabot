@@ -205,6 +205,68 @@ class TorrentIntakeService:
             await self.session.close()
         self.session = None
 
+    async def review_request(
+        self, action: str, *, actor_id: int, actor_role: str,
+        review_id: str | None = None, **fields: Any,
+    ) -> dict[str, Any]:
+        """Use only the gateway's fixed review operations, never a qBit URL."""
+        if actor_role not in {"owner", "admin"} or int(actor_id) <= 0:
+            raise TorrentInputError("Owner or administrator review is required.")
+        if action == "list" and review_id is None:
+            route = "/v1/reviews/list"
+        elif action == "open" and review_id is None:
+            route = "/v1/reviews"
+        elif action in {"status", "cancel", "retry", "approve", "recover"} and re.fullmatch(
+            r"[a-f0-9]{32}", str(review_id or "")
+        ):
+            route = f"/v1/reviews/{review_id}/{action}"
+        else:
+            raise TorrentInputError("Invalid torrent review operation.")
+        if not self.enabled or not self.session or self.session.closed:
+            raise TorrentIntakeError("Torrent review is unavailable.")
+        # Identity cannot be overridden by provider fields.
+        body = {**fields, "actor_id": str(actor_id), "actor_role": actor_role}
+        try:
+            async with self.session.post(
+                self.base_url + route, json=body, allow_redirects=False,
+            ) as response:
+                payload = await response.json(content_type=None)
+                if response.status not in {200, 201, 202}:
+                    code = payload.get("error") if isinstance(payload, dict) else None
+                    messages = {
+                        "forbidden": "Only the authorized owner or administrator can review this request.",
+                        "not_found": "This review has expired. Open `$torrent review` again.",
+                        "manifest_changed": "The file list changed. Refresh and review the new selection.",
+                        "security_hold": "The guard has held this request. Review the recorded reason before recovery.",
+                        "hold_not_recoverable": "This hold requires investigation; ordinary approval cannot clear it.",
+                        "upstream_unavailable": "The review service is unavailable; no approval was confirmed.",
+                        "review_unavailable": "The review service is unavailable; no approval was confirmed.",
+                        "stale_manifest": "The torrent identity or file list changed. Open a fresh review before approving.",
+                        "unsafe_hold": "This hold lacks verified recovery evidence and requires investigation.",
+                        "owner_required": "Only the configured bot owner can recover this hold.",
+                        "scan_result_exists": "A prior scan result requires investigation before another approval.",
+                        "not_stopped": "The torrent changed state during review. Refresh before continuing.",
+                        "already_approved": "Approval is already saved. Reopen the review to inspect current progress.",
+                    }
+                    raise TorrentIntakeError(messages.get(str(code), "The review gate rejected this action. Refresh to see its current state."))
+        except TorrentIntakeError:
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+            raise TorrentIntakeError("The review service did not confirm this action. Refresh before retrying.") from exc
+        if not isinstance(payload, dict):
+            raise TorrentIntakeError("The review service returned an invalid response.")
+        if action == "list":
+            if not isinstance(payload.get("items"), list):
+                raise TorrentIntakeError("The review service returned an invalid queue.")
+        else:
+            if (not re.fullmatch(r"[a-f0-9]{32}", str(payload.get("id", "")))
+                    or str(payload.get("actor_id", "")) != str(actor_id)
+                    or (review_id and action != "retry" and payload.get("id") != review_id)
+                    or not re.fullmatch(r"[a-f0-9]{40}", str(payload.get("info_hash", "")))
+                    or (action == "open" and payload.get("info_hash") != fields.get("info_hash"))):
+                raise TorrentIntakeError("The review service returned a mismatched session receipt.")
+        return payload
+
     async def health(self) -> dict[str, Any]:
         if not self.enabled:
             raise TorrentIntakeError("Torrent intake is not configured.")
