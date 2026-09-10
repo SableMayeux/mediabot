@@ -144,7 +144,7 @@ PREFIX = "$"
 
 OWNER_DM_COMMANDS = frozenset({"think"})
 
-BOT_VERSION = "2.1.0"
+BOT_VERSION = "2.1.1"
 
 # discord.py normally wraps non-successful API responses in HTTPException, but
 # aiohttp connection failures can escape directly before Discord returns a

@@ -1,5 +1,6 @@
 import logging
 import os
+from pathlib import Path
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -23,7 +24,15 @@ class AppImportTests(unittest.TestCase):
             import app
             from mediabot.providers.seerr import SeerrProvider
 
-            self.assertEqual(app.BOT_VERSION, "2.1.0")
+            self.assertEqual(app.BOT_VERSION, "2.1.1")
+            compose_text = (Path(__file__).resolve().parents[1] / "compose.yaml").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn(
+                f"        - {app.BOT_VERSION}\n",
+                compose_text,
+                "Compose runtime health must require the current application version",
+            )
             self.assertIsInstance(app.seerr, SeerrProvider)
             self.assertEqual(app.seerr.api_key, "test-key")
             for command_name in ("discover", "recommend", "rate", "report"):

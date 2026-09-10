@@ -7,6 +7,14 @@ and this project uses semantic version numbers.
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-09-10
+
+### Fixed
+
+- Kept the Docker health probe's expected version in lockstep with the running
+  application. The v2.1.0 deployment gate exposed the stale v2.0.0 probe and
+  automatically restored the healthy previous release.
+
 ## [2.1.0] - 2026-09-10
 
 ### Added
