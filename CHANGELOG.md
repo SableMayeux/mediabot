@@ -7,6 +7,15 @@ and this project uses semantic version numbers.
 
 ## [Unreleased]
 
+## [2.1.2] - 2026-09-10
+
+### Fixed
+
+- Made the Compose-version regression test use an explicit read-only fixture in
+  the isolated deployment sandbox. The v2.1.1 deployment stopped during its
+  preflight tests before production was modified because the sandbox could not
+  resolve the repository-relative Compose path.
+
 ## [2.1.1] - 2026-09-10
 
 ### Fixed

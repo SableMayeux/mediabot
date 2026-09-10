@@ -5,7 +5,7 @@ stack. It gives household users one small, consistent command surface while
 leaving media search, approval, acquisition, and playback with the services
 that already own those jobs.
 
-Current source version: **2.1.1**
+Current source version: **2.1.2**
 
 The 1.x household-media command model remains a compatibility contract. The
 2.x line adds private and guarded workflows around that stable core without
@@ -248,8 +248,8 @@ The repository uses the standard library `unittest` runner:
 python -m pip check
 python -m compileall -q app.py mediabot scripts tests
 python -m unittest discover -s tests -q
-test -x scripts/deploy_v211.sh
-sh -n scripts/deploy_v211.sh
+test -x scripts/deploy_v212.sh
+sh -n scripts/deploy_v212.sh
 ```
 
 The GitHub Actions workflow runs the same dependency, compilation, deployer
@@ -257,7 +257,7 @@ syntax, and full unit-test gates on Python 3.13.
 
 ## Deployment note
 
-`scripts/deploy_v211.sh` is a guarded, transactional deployer for the current
+`scripts/deploy_v212.sh` is a guarded, transactional deployer for the current
 Compose layout. It backs up the runtime and SQLite database, verifies hashes
 and database integrity, performs security and health gates, and rolls back on
 failure. It is intentionally opinionated: audit its target paths, service
