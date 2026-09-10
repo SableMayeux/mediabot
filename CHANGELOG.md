@@ -7,6 +7,19 @@ and this project uses semantic version numbers.
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-09-10
+
+### Added
+
+- Owner-only `$life` views for captured thoughts and Nextcloud tasks, explicit
+  task/event proposals, one-shot task reminders, and ETag-checked completion.
+  Captures remain unchanged; action retries retain the same durable request ID.
+- Owner-only `$ask` with private DM delivery, bounded conversation history,
+  cancellation and a separate authenticated local model gateway. This release
+  has no personal-note retrieval, web search or model-triggered actions.
+- Separate gateway secrets and networks, with release checks that keep the bot
+  outside the Nextcloud database and unauthenticated model networks.
+
 ## [2.2.0] - 2026-09-10
 
 ### Added

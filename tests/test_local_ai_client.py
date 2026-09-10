@@ -1,0 +1,100 @@
+import asyncio
+import json
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import AsyncMock, patch
+import uuid
+
+from mediabot.services.local_ai import LocalAIError, LocalAIService, MODEL, MODEL_DIGEST
+
+URL='http://local-ai-gateway:8080'
+ID='12345678-1234-4abc-8def-123456789abc'
+MESSAGES=[{'role':'user','content':'An original synthetic question.'}]
+
+def answer(**overrides):
+ return {'request_id':ID,'text':'Synthetic answer','model':MODEL,'model_manifest_sha256':MODEL_DIGEST,'retrieval_used':False,'sources':[],'tools_used':[],**overrides}
+
+class Content:
+ def __init__(self,raw):self.raw=raw
+ async def iter_chunked(self,size):
+  for start in range(0,len(self.raw),7):yield self.raw[start:start+7]
+
+class Response:
+ def __init__(self,status=200,body=None,error=None,raw=None):
+  self.status=status;self.error=error;self.content=Content(raw if raw is not None else json.dumps(body,ensure_ascii=False).encode())
+ async def __aenter__(self):
+  if self.error:raise self.error
+  return self
+ async def __aexit__(self,*args):return False
+
+class Session:
+ closed=False
+ def __init__(self,response):self.response=response;self.calls=[];self.close=AsyncMock()
+ def post(self,url,**kwargs):self.calls.append((url,kwargs));return self.response
+
+class LocalAIClientTests(unittest.IsolatedAsyncioTestCase):
+ def client(self,body=None,status=200,error=None,raw=None):
+  result=LocalAIService(base_url=URL);result.session=Session(Response(status,answer() if body is None else body,error,raw));return result
+ async def test_complete_chunked_response_and_redirect_boundary(self):
+  client=self.client(answer(text='\u00e9'*100))
+  result=await client.chat(ID,MESSAGES)
+  self.assertEqual(result['text'],'\u00e9'*100)
+  self.assertFalse(client.session.calls[0][1]['allow_redirects'])
+  self.assertEqual(client.session.calls[0][0],URL+'/v1/chat')
+ async def test_only_fixed_private_gateway_urls(self):
+  for url in ('https://example.org','http://ollama:11434','http://169.254.169.254','http://local-ai-gateway:8080/secret','http://local-ai-gateway:8080?key=x','http://local-ai-gateway:8080#x','http://user:pass@local-ai-gateway:8080',' http://local-ai-gateway:8080','http://local-ai-gateway:bad','http://local-ai-gateway:8080\n'):
+   with self.subTest(url=url),self.assertRaises(LocalAIError):LocalAIService(base_url=url)
+  self.assertFalse(LocalAIService(base_url='').enabled)
+  self.assertTrue(LocalAIService(base_url='http://127.0.0.1:11888/').enabled)
+ async def test_fixed_routes_before_network(self):
+  client=self.client()
+  with self.assertRaises(LocalAIError):await client.request('/api/pull',{})
+  self.assertFalse(client.session.calls)
+ async def test_invalid_uuid_never_reaches_network_for_chat_or_cancel(self):
+  for value in (None,1,[],{},'bad',ID.upper()):
+   client=self.client()
+   with self.subTest(value=value):
+    with self.assertRaises(LocalAIError):await client.chat(value,MESSAGES)
+    with self.assertRaises(LocalAIError):await client.cancel(value)
+    self.assertFalse(client.session.calls)
+ async def test_invalid_messages_and_options_rejected(self):
+  for messages in (None,'text',[],[None],[{'role':[],'content':'x'}],[{'role':'system','content':'x'}],[{'role':'user','content':'x','tools':[]}],[{'role':'user','content':' '}],[{'role':'user','content':'\u00e9'*1501}]):
+   client=self.client()
+   with self.subTest(messages=messages),self.assertRaises(LocalAIError):await client.chat(ID,messages)
+   self.assertFalse(client.session.calls)
+ async def test_response_identity_provenance_and_tools_bound(self):
+  for change in ({'request_id':str(uuid.uuid4())},{'model':'other'},{'model_manifest_sha256':'changed'},{'retrieval_used':True},{'sources':[{}]},{'tools_used':['tool']},{'text':''}):
+   with self.subTest(change=change),self.assertRaises(LocalAIError):await self.client(answer(**change)).chat(ID,MESSAGES)
+ async def test_cancellation_tombstone_receipt_and_identity(self):
+  body={'request_id':ID,'cancel_requested':True,'active':False}
+  self.assertEqual(await self.client(body,202).cancel(ID),body)
+  for invalid in ({**body,'request_id':str(uuid.uuid4())},{**body,'cancel_requested':False},{**body,'active':'false'}):
+   with self.assertRaises(LocalAIError):await self.client(invalid,202).cancel(ID)
+ async def test_no_false_success_for_legacy_cancel_404_or_redirect(self):
+  for status in (404,302):
+   with self.assertRaises(LocalAIError):await self.client({'error':'missing'},status).cancel(ID)
+ async def test_bounded_stream_and_invalid_json(self):
+  with self.assertRaisesRegex(LocalAIError,'oversized'):await self.client(raw=b'x'*65537).chat(ID,MESSAGES)
+  with self.assertRaises(LocalAIError):await self.client(raw=b'{partial').chat(ID,MESSAGES)
+ async def test_specific_errors_and_private_detail_not_echoed(self):
+  for status,code,expected in ((429,'busy','another request'),(409,'cancelled','cancelled'),(503,'foreign_gpu_workload','yielding'),(503,'gpu_monitor_stale','safety monitor'),(503,'request_timeout','deadline'),(401,'unauthorized','unavailable')):
+   with self.subTest(code=code),self.assertRaisesRegex(LocalAIError,expected) as caught:
+    await self.client({'error':code,'detail':'private-secret-value'},status).chat(ID,MESSAGES)
+   self.assertNotIn('private-secret-value',str(caught.exception))
+ async def test_ambiguous_failure_is_not_retried(self):
+  client=self.client(error=asyncio.TimeoutError())
+  with self.assertRaises(LocalAIError):await client.chat(ID,MESSAGES)
+  self.assertEqual(len(client.session.calls),1)
+ async def test_concurrent_start_uses_one_session_and_no_environment_proxy(self):
+  with tempfile.TemporaryDirectory() as directory:
+   token=Path(directory)/'token';token.write_text('a'*64)
+   client=LocalAIService(base_url=URL,token_path=token)
+   session=Session(Response(body=answer()))
+   with patch('mediabot.services.local_ai.aiohttp.ClientSession',return_value=session) as factory:
+    await asyncio.gather(client.start(),client.start())
+    factory.assert_called_once();self.assertFalse(factory.call_args.kwargs['trust_env'])
+    self.assertEqual(factory.call_args.kwargs['timeout'].total,70)
+   await client.close();session.close.assert_awaited_once()
+
+if __name__=='__main__':unittest.main()

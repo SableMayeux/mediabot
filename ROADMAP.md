@@ -32,6 +32,11 @@ current media-provider boundary:
 
 ## Later 2.x: broader integrations
 
+Version 2.3 provides explicit capture-to-task/event promotion, task completion,
+one-shot task reminders, and private local text conversation. Retrieval and
+web search remain separate milestones. Local conversation cannot execute
+the Life operations.
+
 Candidate integrations include:
 
 - Home Assistant intents and household automation;

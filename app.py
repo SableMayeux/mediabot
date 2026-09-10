@@ -70,6 +70,10 @@ from mediabot.providers.sonarr import (
 )
 from mediabot.services.library import LibraryService
 from mediabot.services.life_capture import LifeCaptureError, LifeCaptureService
+from mediabot.services.life_workflow import LifeWorkflowService
+from mediabot.ui.life_workflow import LifeLauncher
+from mediabot.services.local_ai import LocalAIService
+from mediabot.ui.local_ai import LocalChatView
 from mediabot.ui.torrent_review import TorrentReviewLauncher, review_role
 from mediabot.services.torrent_intake import (
     TorrentInputError,
@@ -143,9 +147,9 @@ TORRENT_INTAKE_TOKEN_PATH = os.environ.get(
 
 PREFIX = "$"
 
-OWNER_DM_COMMANDS = frozenset({"think"})
+OWNER_DM_COMMANDS = frozenset({"think", "life", "ask"})
 
-BOT_VERSION = "2.2.0"
+BOT_VERSION = "2.3.0"
 
 # discord.py normally wraps non-successful API responses in HTTPException, but
 # aiohttp connection failures can escape directly before Discord returns a
@@ -630,6 +634,8 @@ life_capture = (
     if LIFE_CAPTURE_PATH
     else None
 )
+life_workflow = LifeWorkflowService()
+local_ai = LocalAIService()
 torrent_intake = TorrentIntakeService(
     base_url=TORRENT_INTAKE_URL,
     token_path=TORRENT_INTAKE_TOKEN_PATH,
@@ -10054,8 +10060,11 @@ async def think(ctx, *, thought: str = ""):
         return
 
     confirmation = f"Captured. `{capture.capture_id[:8]}`"
+    view = LifeLauncher(bot=bot, service=life_workflow, actor_id=ctx.author.id,
+        guild_id=getattr(ctx.guild, "id", None),
+        capture={"id": capture.capture_id, "title": capture.title, "created_at": capture.created_at}) if life_workflow.enabled else None
     if ctx.guild is None:
-        await ctx.reply(confirmation)
+        await ctx.reply(confirmation, **({"view": view} if view else {}))
         return
 
     deleted = await delete_message_safely(
@@ -10063,12 +10072,50 @@ async def think(ctx, *, thought: str = ""):
         label="private life capture command",
     )
     if deleted:
-        await ctx.send(confirmation, delete_after=15)
+        await ctx.send(confirmation, delete_after=300 if view else 15, **({"view": view} if view else {}))
     else:
         await ctx.reply(
             f"{confirmation} I could not remove the original message.",
             delete_after=30,
+            **({"view": view} if view else {}),
         )
+
+
+@bot.command(name="ask", hidden=True, help="Ask the private local model. No notes, web lookup, or automatic actions.")
+@commands.is_owner()
+async def ask(ctx, *, question: str = ""):
+    if not question.strip():
+        await ctx.reply("Use `$ask <question>`. Answers stay private; this model does not search your notes or the web.")
+        return
+    if ctx.guild is not None:
+        deleted = await delete_message_safely(ctx.message, label="private local model question")
+        if not deleted:
+            await ctx.send("I could not remove the public question, so it was not sent to the model. Message me directly instead.", delete_after=30)
+            return
+    if not local_ai.enabled:
+        await ctx.send("The local model is not configured yet.", **({"delete_after": 30} if ctx.guild else {}))
+        return
+    view = LocalChatView(bot=bot, service=local_ai, actor_id=ctx.author.id, guild_id=None)
+    try:
+        view.message = await ctx.author.send("Opening a private local conversation...", view=view)
+    except discord.HTTPException:
+        view.stop()
+        await ctx.send("I could not deliver privately. Enable DMs or message me directly.", **({"delete_after": 30} if ctx.guild else {}))
+        return
+    await view.generate(question)
+
+
+@bot.command(name="life", hidden=True, help="Open your private captures and Nextcloud tasks. Use `$life tasks` for task selection and completion.")
+@commands.is_owner()
+async def life(ctx, section: str = "inbox"):
+    if section.casefold() not in {"inbox", "tasks"}:
+        await ctx.reply("Use `$life` or `$life tasks`.")
+        return
+    view = LifeLauncher(bot=bot, service=life_workflow, actor_id=ctx.author.id,
+        guild_id=getattr(ctx.guild, "id", None), initial="tasks" if section.casefold() == "tasks" else "captures")
+    message = await ctx.reply("Open your private captures and Nextcloud actions.", view=view)
+    if ctx.guild is not None:
+        register_transient_card(message=message, command_message=None, kind="life")
 
 
 @bot.command(
@@ -13366,6 +13413,8 @@ async def main():
         if watcher_tasks:
             await asyncio.gather(*watcher_tasks, return_exceptions=True)
         await torrent_intake.close()
+        await life_workflow.close()
+        await local_ai.close()
         await sonarr.close()
         await soulsync.close()
         await jellyfin.close()

@@ -499,3 +499,26 @@ MediaBot MUST NOT become a replacement for:
 - SoulSync
 
 It orchestrates them.
+
+## Private Life and local conversation
+
+`$think` writes the original Markdown before offering an owner-only private
+Life view. `$life` lists captures and Nextcloud tasks. Task/event creation and
+task completion are explicit proposals, each with a stable UUID for safe
+retries. The separate Life gateway enforces the owner identity again, reads the
+raw inbox through a read-only mount, and holds the Nextcloud app credential.
+Nextcloud is authoritative; completion requires its current ETag and refuses
+recurring or shared scheduling changes. The gateway's durable operation and
+one-shot reminder ledger lives outside MediaBot's database.
+
+`$ask` sends its response through a private DM. Guild questions must be deleted
+before inference. Follow-ups use bounded memory only; Discord still stores the
+messages. The bot reaches only an authenticated text gateway, outside the
+unauthenticated model network. The gateway restricts model/context/output,
+checks a host GPU monitor, yields to competing media activity, and unloads the
+model after each request. Cancellation uses the same request UUID. Personal
+note retrieval, external search, and model-driven task changes are not enabled.
+
+Both clients initialize lazily. A gateway outage leaves raw capture and the
+household media services operational. Container secret mounts are distinct;
+the bot has no Nextcloud administrative credential or Docker socket.

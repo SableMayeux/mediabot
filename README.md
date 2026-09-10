@@ -5,7 +5,7 @@ stack. It gives household users one small, consistent command surface while
 leaving media search, approval, acquisition, and playback with the services
 that already own those jobs.
 
-Current source version: **2.2.0**
+Current source version: **2.3.0**
 
 The 1.x household-media command model remains a compatibility contract. The
 2.x line adds private and guarded workflows around that stable core without
@@ -32,6 +32,12 @@ turning household commands into an administration console. See
 - Gives the bot owner a durable `$think` inbox for raw Markdown captures. A
   thought is always saved before any future classification; it is not silently
   promoted into a task.
+- Opens private `$life` capture/task views. Creating a Nextcloud task or event,
+  or completing a task, requires an explicit confirmation. Optional task
+  reminders are one-shot Nextcloud notifications, separate from due dates.
+- Runs owner-only `$ask <question>` conversations through the local model in
+  private DMs. Follow-ups stay in memory for ten minutes; the model cannot search
+  notes, browse the web, or change tasks. Discord retains the private messages.
 - Gives verified Discord accounts linked to a Seerr media identity a narrow
   `$torrent <type> <magnet>` intake path for movies, TV, music, games,
   applications, and other payloads. It removes the Discord source
@@ -74,9 +80,17 @@ The default prefix is `$`.
 | `$new [count]` | Show recently added Jellyfin media. |
 | `$help [command]` | Show the current user-facing command model and generated details. |
 
-Two sensitive utilities are intentionally omitted from normal help:
-`$think <text>` (alias `$capture`) is owner-only and writes a private raw note,
-while `$torrent <movie|tv|music|game|app|other> <magnet>` accepts one BTIH magnet from the owner or a
+Sensitive utilities are intentionally omitted from normal help:
+`$think <text>` (alias `$capture`) is owner-only and writes a private raw note.
+`$life` opens a private capture selector; `$life tasks` opens current Nextcloud
+tasks. A selected capture offers **Make task** and **Plan event**, each followed
+by a confirmation. Enter dates as `YYYY-MM-DD HH:MM` in America/Denver, or use an
+explicit ISO UTC offset. A task due date is separate from its optional reminder.
+`$ask <question>` starts a private local conversation with follow-up, new-topic
+and cancellation controls. Replies go to DMs, including when started in a guild.
+These three commands are owner-only and also work in the owner's DMs.
+
+`$torrent <movie|tv|music|game|app|other> <magnet>` accepts one BTIH magnet from the owner or a
 Discord account explicitly linked to a Seerr media identity. Torrent intake is
 available only in the configured Media Discord because MediaBot cannot delete
 the user's DM source; if guild-message deletion fails, nothing is queued.
@@ -264,8 +278,8 @@ The repository uses the standard library `unittest` runner:
 python -m pip check
 python -m compileall -q app.py mediabot scripts tests
 python -m unittest discover -s tests -q
-test -x scripts/deploy_v220.sh
-sh -n scripts/deploy_v220.sh
+test -x scripts/deploy_v230.sh
+sh -n scripts/deploy_v230.sh
 ```
 
 The GitHub Actions workflow runs the same dependency, compilation, deployer
@@ -273,11 +287,20 @@ syntax, and full unit-test gates on Python 3.13.
 
 ## Deployment note
 
-`scripts/deploy_v220.sh` is a guarded, transactional deployer for the current
+`scripts/deploy_v230.sh` is a guarded, transactional deployer for the current
 Compose layout. It backs up the runtime and SQLite database, verifies hashes
 and database integrity, performs security and health gates, and rolls back on
 failure. It is intentionally opinionated: audit its target paths, service
 name, ownership model, and staging contract before using it on another host.
+
+The supplied 2.3 Compose deployment requires already commissioned Life and
+local-text gateways, their mode-0600 uid-1000 secret files, and the external
+`life_intake` and `local-ai_frontend` networks. The Life gateway must have an
+independent owner allowlist and Nextcloud app password. The local model needs
+its supervised GPU monitor. Verify an independent backup restoration before
+commissioning these services. The bot's release gates check authenticated
+connectivity and isolation; raw capture remains available during later gateway
+outages. No model inference or personal-data mutation runs as a deployment gate.
 
 To prove rollback before a release, run the same staged deployment with
 `MEDIABOT_ROLLBACK_DRILL=1`. The candidate must become healthy first; the
