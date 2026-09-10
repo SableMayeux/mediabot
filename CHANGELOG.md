@@ -7,6 +7,14 @@ and this project uses semantic version numbers.
 
 ## [Unreleased]
 
+## [2.1.3] - 2026-09-10
+
+### Fixed
+
+- Updated the GitHub Actions release gate to validate the current transactional
+  deployer. The v2.1.2 tag failed CI because the workflow still named the
+  retired v2.1.1 script; production remained untouched.
+
 ## [2.1.2] - 2026-09-10
 
 ### Fixed
