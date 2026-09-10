@@ -7,14 +7,24 @@ and this project uses semantic version numbers.
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-09-10
+
+### Added
+
+- Added fixed torrent routes and aliases for music, games, applications, and
+  other payloads. Games, applications, and other payloads stay stopped in
+  manual-review quarantine and cannot feed Starr automation.
+- Added an audio-aware scanner route for torrent music. SoulSync remains the
+  automatic Navidrome import path.
+
 ### Changed
 
-- Allow Discord users with an administrator-verified Seerr media link to use
+- Allowed Discord users with an administrator-verified Seerr media link to use
   the guarded `$torrent` intake command; the bot owner retains access.
 
 ### Security
 
-- Keep torrent intake hidden from normal help, guild-only, and fail-closed on
+- Kept torrent intake hidden from normal help, guild-only, and fail-closed on
   source deletion before linked-account or input validation.
 
 ## [2.0.0] - 2026-09-09

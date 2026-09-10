@@ -6,14 +6,14 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "scripts" / "deploy_v200.sh"
+SCRIPT = ROOT / "scripts" / "deploy_v210.sh"
 
 
-class DeployV200ContractTests(unittest.TestCase):
+class DeployV210ContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.source = SCRIPT.read_text(encoding="utf-8")
-        cls.legacy_source = (ROOT / "scripts" / "deploy_v110.sh").read_text(
+        cls.legacy_source = (ROOT / "scripts" / "deploy_v200.sh").read_text(
             encoding="utf-8"
         )
 
@@ -23,8 +23,8 @@ class DeployV200ContractTests(unittest.TestCase):
         self.assertTrue(SCRIPT.is_file())
 
     def test_release_and_stage_are_exact(self):
-        self.assertIn('release_version="2.0.0"', self.source)
-        self.assertIn('stage_namespace="/tmp/mediabot-v200-"', self.source)
+        self.assertIn('release_version="2.1.0"', self.source)
+        self.assertIn('stage_namespace="/tmp/mediabot-v210-"', self.source)
         self.assertNotIn("mediabot-v091-", self.source)
         self.assertNotIn("mediabot-v080-", self.source)
 
@@ -55,7 +55,7 @@ class DeployV200ContractTests(unittest.TestCase):
         self.assertIn("MEDIABOT_ALLOWED_GUILD_IDS", self.source)
         self.assertIn('"ALLOWED_GUILD_IDS=" + value', self.source)
         self.assertIn("os.chown(directory, 1000, 1000)", self.source)
-        self.assertIn(".mediabot-write-probe-v200", self.source)
+        self.assertIn(".mediabot-write-probe-v210", self.source)
         self.assertIn('connection.execute("BEGIN IMMEDIATE")', self.source)
 
     def test_v2_private_boundaries_are_preflighted_and_release_gated(self):
