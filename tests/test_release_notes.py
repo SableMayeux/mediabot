@@ -1,5 +1,11 @@
 import unittest
-from scripts.release_notes import release_notes
+import importlib.util
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location('release_notes', Path(__file__).resolve().parents[1] / 'scripts/release_notes.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+release_notes = module.release_notes
 
 class ReleaseNotesTests(unittest.TestCase):
     def test_only_requested_stable_tag_section_is_published(self):
