@@ -13,6 +13,17 @@ from mediabot.ui.life_workflow import OwnerView
 _CURRENT = object()
 
 
+def conversation_embed(prompt, answer="Thinking locally..."):
+    # Keep every question, including private questions, inside Discord's limits.
+    question = str(prompt).strip()
+    embed = discord.Embed(title="Local conversation", description=answer[:min(3900, 5600 - len(question))])
+    for index in range(0, len(question), 1000):
+        embed.add_field(name="Question" if index == 0 else "Question continued",
+                        value=question[index:index + 1000], inline=False)
+    embed.set_footer(text="Llama 3.2 3B. No notes or web searched; no tools or actions. Context expires after 10 minutes; these messages remain.")
+    return embed
+
+
 def append_prompt(history, prompt):
     text = str(prompt).strip()
     if not text or len(text.encode("utf-8")) > 3000:
@@ -53,6 +64,7 @@ class LocalChatView(OwnerView):
         self.cancel_requested = None
         self.closed = False
         self.revision = 0
+        self.turn_visible = False
         self.rebuild()
 
     async def interaction_check(self, interaction):
@@ -124,8 +136,27 @@ class LocalChatView(OwnerView):
             async with self.lock:
                 if not self.current(identity):
                     return
-                if not await self.edit_response(content="Thinking locally...", embed=None, view=self):
+                if self.turn_visible:
+                    # Archive the previous turn intact, moving only its controls.
+                    previous = self.message
+                    try:
+                        following = await previous.reply(embed=conversation_embed(prompt), view=self,
+                            mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+                    except discord.HTTPException:
+                        if interaction:
+                            await interaction.followup.send("I could not open a new reply. The earlier question and answer are preserved.", ephemeral=True)
+                        return
+                    self.message = following
+                    if not self.destination_matches():
+                        self.message = previous
+                        return
+                    try:
+                        await previous.edit(view=None)
+                    except discord.HTTPException:
+                        pass  # The old controls are revision-bound and cannot submit.
+                if not await self.edit_response(content=None, embed=conversation_embed(prompt), view=self):
                     return
+                self.turn_visible = True
             async with self.lock:
                 if not self.current(identity):
                     return
@@ -134,18 +165,14 @@ class LocalChatView(OwnerView):
                 if not self.current(identity):
                     return
                 if self.cancel_requested == identity:
-                    await self.edit_response(content="Response discarded after cancellation.", embed=None)
+                    await self.edit_response(content="Response discarded after cancellation.")
                     return
                 self.history = messages + [{"role": "assistant", "content": result["text"]}]
-                embed = discord.Embed(title="Local conversation", description=result["text"][:3900])
-                if not self.private:
-                    embed.add_field(name="Question", value=str(prompt)[:1000], inline=False)
-                embed.set_footer(text="Llama 3.2 3B. No notes or web searched; no tools or actions. This conversation expires after 10 minutes.")
-                await self.edit_response(content=None, embed=embed)
+                await self.edit_response(content=None, embed=conversation_embed(prompt, result["text"]))
         except LocalAIError as exc:
             async with self.lock:
                 if self.current(identity):
-                    await self.edit_response(content=str(exc), embed=None)
+                    await self.edit_response(content=str(exc))
         except asyncio.CancelledError:
             try:
                 await self.service.cancel(identity)

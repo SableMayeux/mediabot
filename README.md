@@ -5,7 +5,7 @@ stack. It gives household users one small, consistent command surface while
 leaving media search, approval, acquisition, and playback with the services
 that already own those jobs.
 
-Current source version: **2.4.0**
+Current source version: **2.5.0**
 
 The 1.x household-media command model remains a compatibility contract. The
 2.x line adds private and guarded workflows around that stable core without
@@ -91,7 +91,7 @@ explicit ISO UTC offset. A task due date is separate from its optional reminder.
 `$think` and `$life` are owner-only and also work in the owner's DMs.
 
 `$ask <question>` replies in the originating channel. `$ask --private <question>`
-first removes the guild command and delivers only by DM; failed deletion or
+copies the question to DM before removing the guild command; failed deletion or
 blocked DMs prevent inference. Asking directly in DM replies there. Chat is
 available to current members of the configured server and the owner. New chat
 commands are limited to two per user per 30 seconds; the gateway still permits
@@ -289,8 +289,8 @@ The repository uses the standard library `unittest` runner:
 python -m pip check
 python -m compileall -q app.py mediabot scripts tests
 python -m unittest discover -s tests -q
-test -x scripts/deploy_v240.sh
-sh -n scripts/deploy_v240.sh
+test -x scripts/deploy_v250.sh
+sh -n scripts/deploy_v250.sh
 ```
 
 The GitHub Actions workflow runs the same dependency, compilation, deployer
@@ -298,7 +298,7 @@ syntax, and full unit-test gates on Python 3.13.
 
 ## Deployment note
 
-`scripts/deploy_v240.sh` is a guarded, transactional deployer for the current
+`scripts/deploy_v250.sh` is a guarded, transactional deployer for the current
 Compose layout. It backs up the runtime and SQLite database, verifies hashes
 and database integrity, performs security and health gates, and rolls back on
 failure. It is intentionally opinionated: audit its target paths, service
@@ -326,3 +326,25 @@ Read [SECURITY.md](SECURITY.md) before exposing the bot or any provider API.
 Keep `.env` protected, grant the Discord bot only the permissions it needs,
 and keep provider management endpoints on a trusted network or authenticated
 reverse proxy.
+
+### Optional automatic Life task
+
+Use `$think --auto I need to call the mechanic` to save the raw capture and ask
+for one automatic task decision. An accepted task title must be quoted from the
+thought. The result stays private. Ambiguous text, a note decision, invalid model
+output, or unavailable services leaves the raw capture for `$life` review.
+No dates or reminders are inferred, even when a thought mentions relative time.
+Set those explicitly in Life or Nextcloud. A small local model can miss a real
+task; it is not a guaranteed classifier. An unconfirmed write retains the same
+request ID for the displayed retry. Plain `$think` still only captures.
+
+Chat cards retain the full question. Follow-ups and new topics create separate
+messages rather than replacing the preceding exchange. Context is temporary,
+limited to 12 messages and 3000 UTF-8 bytes, and expires after ten minutes.
+Discord retains the messages. New topic clears model context only. There is no
+persistent conversational memory or automatic channel reading.
+
+Stable version tags publish GitHub releases automatically only after tag CI
+passes. Release notes come from the matching changelog entry; a missing entry
+fails publication. Companion services and live deployment are separately
+verified and are not implied merely by creating a release page.

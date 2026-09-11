@@ -6,10 +6,10 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "scripts" / "deploy_v240.sh"
+SCRIPT = ROOT / "scripts" / "deploy_v250.sh"
 
 
-class DeployV240ContractTests(unittest.TestCase):
+class DeployV250ContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.source = SCRIPT.read_text(encoding="utf-8")
@@ -23,8 +23,8 @@ class DeployV240ContractTests(unittest.TestCase):
         self.assertTrue(SCRIPT.is_file())
 
     def test_release_and_stage_are_exact(self):
-        self.assertIn('release_version="2.4.0"', self.source)
-        self.assertIn('stage_namespace="/tmp/mediabot-v240-"', self.source)
+        self.assertIn('release_version="2.5.0"', self.source)
+        self.assertIn('stage_namespace="/tmp/mediabot-v250-"', self.source)
         self.assertNotIn("mediabot-v091-", self.source)
         self.assertNotIn("mediabot-v080-", self.source)
 
@@ -55,7 +55,7 @@ class DeployV240ContractTests(unittest.TestCase):
         self.assertIn("MEDIABOT_ALLOWED_GUILD_IDS", self.source)
         self.assertIn('"ALLOWED_GUILD_IDS=" + value', self.source)
         self.assertIn("os.chown(directory, 1000, 1000)", self.source)
-        self.assertIn(".mediabot-write-probe-v240", self.source)
+        self.assertIn(".mediabot-write-probe-v250", self.source)
         self.assertIn(
             "-e MEDIABOT_COMPOSE_PATH=/test-fixtures/compose.yaml",
             self.source,

@@ -17,7 +17,7 @@ import app
 
 class PrivateLifeCommandTests(unittest.IsolatedAsyncioTestCase):
     def context(self, guild=None):
-        message = SimpleNamespace(guild=guild, channel=SimpleNamespace(id=20))
+        message = SimpleNamespace(guild=guild, channel=SimpleNamespace(id=20), edit=AsyncMock())
         return SimpleNamespace(guild=guild, author=SimpleNamespace(id=12, send=AsyncMock(return_value=message)),
             message=Mock(), send=AsyncMock(), reply=AsyncMock(return_value=message), channel=SimpleNamespace(id=20), clean_prefix="$")
 
@@ -38,11 +38,14 @@ class PrivateLifeCommandTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_source_deletion_prevents_inference(self):
         ctx = self.context(SimpleNamespace(id=10))
+        view = SimpleNamespace(generate=AsyncMock(), stop=Mock())
         with patch.object(app, "delete_message_safely", AsyncMock(return_value=False)), \
-             patch.object(app, "LocalChatView") as factory:
+             patch.object(app, "local_ai", SimpleNamespace(enabled=True)), \
+             patch.object(app, "LocalChatView", return_value=view):
             await app.ask.callback(ctx, question="--private private fixture")
-        factory.assert_not_called()
-        ctx.author.send.assert_not_awaited()
+        view.generate.assert_not_awaited()
+        ctx.author.send.assert_awaited_once()
+        self.assertEqual(ctx.author.send.call_args.kwargs["embed"].fields[0].value, "private fixture")
         self.assertNotIn("private fixture", str(ctx.send.call_args))
 
     async def test_blocked_dm_has_no_public_answer_fallback(self):
@@ -149,6 +152,23 @@ class PrivateLifeCommandTests(unittest.IsolatedAsyncioTestCase):
         capture.capture.assert_called_once()
         self.assertEqual(capture.capture.call_args.args, ("unaltered raw fixture",))
         self.assertNotIn("view", ctx.reply.call_args.kwargs)
+
+    async def test_auto_always_saves_raw_thought_before_classification(self):
+        ctx=self.context(); events=[]
+        capture=SimpleNamespace(capture=Mock(side_effect=lambda *a,**k: (events.append('saved'),SimpleNamespace(capture_id='abc'))[1]))
+        async def promote(*a,**k):
+            self.assertEqual(events,['saved']);events.append('classified')
+            self.assertEqual(k['thought'],'Call the mechanic')
+        with patch.object(app,'life_capture',capture),patch.object(app,'promote_automatically',side_effect=promote):
+            await app.think.callback(ctx,thought='--auto Call the mechanic')
+        self.assertEqual(events,['saved','classified'])
+        self.assertEqual(capture.capture.call_args.args,('Call the mechanic',))
+
+    async def test_failed_capture_never_reaches_auto_model(self):
+        ctx=self.context()
+        with patch.object(app,'life_capture',SimpleNamespace(capture=Mock(side_effect=app.LifeCaptureError('Unable to save')))),patch.object(app,'promote_automatically',AsyncMock()) as promote:
+            await app.think.callback(ctx,thought='--auto Call the mechanic')
+        promote.assert_not_awaited()
 
 
 if __name__ == "__main__":

@@ -7,6 +7,30 @@ and this project uses semantic version numbers.
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-09-10
+
+### Added
+
+- Owner-only `$think --auto` saves the raw thought first, then asks the local
+  model whether it clearly describes a task. Only a title quoted from the
+  thought is accepted. Notes, uncertainty, invalid output, and unavailable
+  services leave the capture available for manual review. No dates, reminders,
+  calendar events, or additional actions are inferred.
+- Automatic task creation uses a stable request ID and the existing verified
+  Nextcloud receipts. An unconfirmed submission offers a retry of that exact
+  task and request, without rerunning the model.
+- Publish GitHub release pages from recorded changelog entries after tag CI
+  succeeds, so releases stay aligned with version tags.
+
+### Fixed
+
+- Preserve the full question in public and private local-chat cards. Follow-ups
+  and new topics create new messages, keeping earlier questions and answers.
+  Failed and cancelled generations retain their questions as well.
+- Copy private guild questions to the requested DM before deleting their source.
+  Blocked DM delivery leaves the original question intact. Failed deletion
+  still prevents inference and never falls back to a public answer.
+
 ## [2.4.0] - 2026-09-10
 
 ### Changed

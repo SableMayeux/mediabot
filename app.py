@@ -74,7 +74,9 @@ from mediabot.services.life_workflow import LifeWorkflowService
 from mediabot.ui.life_workflow import LifeLauncher
 from mediabot.services.local_ai import LocalAIService
 from mediabot.services.chat_access import allowed_chat_user
-from mediabot.ui.local_ai import LocalChatView
+from mediabot.ui.local_ai import LocalChatView, append_prompt, conversation_embed
+from mediabot.ui.life_auto import promote_automatically
+from mediabot.services.local_ai import LocalAIError
 from mediabot.ui.torrent_review import TorrentReviewLauncher, review_role
 from mediabot.services.torrent_intake import (
     TorrentInputError,
@@ -150,7 +152,7 @@ PREFIX = "$"
 
 OWNER_DM_COMMANDS = frozenset({"think", "life"})
 
-BOT_VERSION = "2.4.0"
+BOT_VERSION = "2.5.0"
 
 # discord.py normally wraps non-successful API responses in HTTPException, but
 # aiohttp connection failures can escape directly before Discord returns a
@@ -1571,7 +1573,7 @@ def short_overview(
     )
 
     if len(overview) > limit:
-        return overview[:limit - 1].rstrip() + "…"
+        return overview[:limit - 1].rstrip() + "â€¦"
 
     return overview
 
@@ -3486,7 +3488,7 @@ class SearchResultsView(
 
         self.prev_button = (
             discord.ui.Button(
-                label="◀ Previous",
+                label="â—€ Previous",
                 style=(
                     discord.ButtonStyle.secondary
                 ),
@@ -3496,7 +3498,7 @@ class SearchResultsView(
 
         self.next_button = (
             discord.ui.Button(
-                label="Next ▶",
+                label="Next â–¶",
                 style=(
                     discord.ButtonStyle.secondary
                 ),
@@ -3692,8 +3694,8 @@ class SearchResultsView(
                 (
                     f"**{index}. "
                     f"{title} ({year})**\n"
-                    f"{media_type} • "
-                    f"{rating} • "
+                    f"{media_type} â€¢ "
+                    f"{rating} â€¢ "
                     f"{status}\n"
                     f"*{short_overview(item)}*"
                 )
@@ -3709,10 +3711,10 @@ class SearchResultsView(
             text=(
                 f"Page "
                 f"{self.display_page + 1} "
-                f"• expires after "
+                f"â€¢ expires after "
                 f"{REQUEST_UI_TIMEOUT // 60} "
                 "minutes of inactivity "
-                "• only the requester "
+                "â€¢ only the requester "
                 "can use these buttons"
             )
         )
@@ -4567,7 +4569,7 @@ class RecommendationCardView(RecommendationCandidateView):
             signal_parts.append(f"Trakt {trakt_status}")
             if not rating_count and not history_count and not self.signals.get("trakt_available"):
                 signal_parts.append("community-ranking fallback")
-            footer += " • " + " • ".join(signal_parts)
+            footer += " â€¢ " + " â€¢ ".join(signal_parts)
 
         embed.set_footer(text=footer)
         return embed
@@ -5216,7 +5218,7 @@ class JellyfinAvailableView(
 
         self.add_item(
             discord.ui.Button(
-                label="▶ Watch in Jellyfin",
+                label="â–¶ Watch in Jellyfin",
                 style=discord.ButtonStyle.link,
                 url=jellyfin.watch_url(
                     jellyfin_item_id
@@ -5317,7 +5319,7 @@ def jellyfin_item_summary(
             )
         )
 
-    return " • ".join(parts)
+    return " â€¢ ".join(parts)
 
 
 # ============================================================
@@ -9630,7 +9632,7 @@ COMMAND_USAGE = {
     "event complete": "event complete <event id>",
     "event cancel": "event cancel <event id>",
     "music": "music <artist and track>",
-    "think": "think <anything on your mind>",
+    "think": "think [--auto] <anything on your mind>",
     "torrent": "torrent <movie|tv|music|game|app|other> <magnet link>",
     "discover": "discover [movie|show] [genres] [--count N] [--top N] [--random]",
     "recommend": "recommend [movie|show] [genres] [--count N] [--top N] [--random]",
@@ -9744,7 +9746,7 @@ async def mediabot_help(
         lines = [f"`{prefix}ask <question>` - local conversation here in DM (server members)",
                  f"`{prefix}help <command>` - command details"]
         if is_bot_owner:
-            lines += [f"`{prefix}think <text>` - save your private raw capture",
+            lines += [f"`{prefix}think [--auto] <text>` - save your private raw capture",
                       f"`{prefix}life inbox` - your captures and confirmed task/event creation",
                       f"`{prefix}life tasks` - your Nextcloud tasks and completion"]
         embed = discord.Embed(title="MediaBot in DMs", description="\n".join(lines), color=discord.Color.blurple())
@@ -9876,7 +9878,7 @@ async def mediabot_help(
             utility_lines.append(f"`{prefix}admin` - administrator tools")
         if is_bot_owner:
             utility_lines.append(
-                f"`{prefix}think <text>` - save a private raw capture"
+                f"`{prefix}think [--auto] <text>` - save a private raw capture"
             )
         if can_use_torrent:
             utility_lines.append(
@@ -9896,7 +9898,7 @@ async def mediabot_help(
     if normalized_topic != "all":
         embed.add_field(name="Local conversation", value=f"`{prefix}ask <question>` - answer in this channel\n`{prefix}ask --private <question>` - answer privately in DM", inline=False)
         if is_bot_owner:
-            embed.add_field(name="Your private Life workspace", value=f"`{prefix}think <text>` - capture a thought\n`{prefix}life inbox` / `{prefix}life tasks` - captures, tasks and confirmed actions", inline=False)
+            embed.add_field(name="Your private Life workspace", value=f"`{prefix}think [--auto] <text>` - capture a thought\n`{prefix}life inbox` / `{prefix}life tasks` - captures, tasks and confirmed actions", inline=False)
         embed.add_field(
             name="Movies and shows",
             value=(
@@ -10059,13 +10061,17 @@ async def ping(ctx):
 )
 @commands.is_owner()
 async def think(ctx, *, thought: str = ""):
+    parts = thought.lstrip().split(maxsplit=1)
+    automatic = bool(parts and parts[0].casefold() == "--auto")
+    if automatic:
+        thought = parts[1] if len(parts) > 1 else ""
     if life_capture is None:
         await ctx.reply("The private Life inbox is not configured yet.")
         return
 
     if not thought.strip():
         await ctx.reply(
-            "Usage: `$think <anything on your mind>`\n"
+            "Usage: `$think [--auto] <anything on your mind>`\n"
             "I save the raw thought first; organizing it comes later."
         )
         return
@@ -10087,6 +10093,15 @@ async def think(ctx, *, thought: str = ""):
         return
 
     confirmation = f"Captured. `{capture.capture_id[:8]}`"
+    if automatic:
+        if ctx.guild is not None:
+            deleted = await delete_message_safely(ctx.message, label="private automatic life capture")
+            if not deleted:
+                await ctx.reply(confirmation + " I could not remove the original message. No automatic action was submitted; use `$life`.")
+                return
+        await promote_automatically(ctx, bot=bot, model=local_ai, service=life_workflow,
+            capture=capture, thought=thought)
+        return
     view = LifeLauncher(bot=bot, service=life_workflow, actor_id=ctx.author.id,
         guild_id=getattr(ctx.guild, "id", None),
         capture={"id": capture.capture_id, "title": capture.title, "created_at": capture.created_at}) if life_workflow.enabled else None
@@ -10127,11 +10142,11 @@ async def ask(ctx, *, question: str = ""):
     if not question:
         await ctx.reply("Use `$ask <question>` for an answer here, or `$ask --private <question>` for a DM. This model does not search your notes or the web.")
         return
-    if private and ctx.guild is not None:
-        deleted = await delete_message_safely(ctx.message, label="private local model question")
-        if not deleted:
-            await ctx.send("I could not remove the public question, so it was not sent to the model. Message me directly instead.", delete_after=30)
-            return
+    try:
+        append_prompt([], question)
+    except LocalAIError as exc:
+        await ctx.reply(str(exc))
+        return
     if not local_ai.enabled:
         await ctx.send("The local model is not configured yet.", **({"delete_after": 30} if ctx.guild else {}))
         return
@@ -10142,7 +10157,8 @@ async def ask(ctx, *, question: str = ""):
         guild_id=None if private else origin_guild_id, private=private, authorize=authorize)
     try:
         if private and ctx.guild is not None:
-            view.message = await ctx.author.send("Opening a private local conversation...", view=view)
+            view.message = await ctx.author.send(embed=conversation_embed(question, "Opening a private local conversation..."),
+                allowed_mentions=discord.AllowedMentions.none())
         else:
             view.message = await ctx.reply("Opening a local conversation...", view=view, mention_author=False)
         view.channel_id = view.message.channel.id
@@ -10150,6 +10166,13 @@ async def ask(ctx, *, question: str = ""):
         view.stop()
         await ctx.send("I could not deliver to the requested destination. For private chat, enable DMs or message me directly.", **({"delete_after": 30} if ctx.guild else {}))
         return
+    if private and ctx.guild is not None:
+        deleted = await delete_message_safely(ctx.message, label="private local model question")
+        if not deleted:
+            view.stop()
+            await view.message.edit(content="I could not remove the public question. No inference was submitted.", view=None)
+            await ctx.send("I could not remove the public question, so it was not sent to the model. Message me directly instead.", delete_after=30)
+            return
     await view.generate(question)
 
 
@@ -10633,7 +10656,7 @@ async def send_available_discovery_batch(ctx, batch):
         embed.set_footer(
             text=(
                 f"{batch.eligible_count} available Jellyfin title"
-                f"{'s' if batch.eligible_count != 1 else ''}{filter_text} • "
+                f"{'s' if batch.eligible_count != 1 else ''}{filter_text} â€¢ "
                 f"selected from the top {min(batch.options.pool_size, batch.eligible_count)}"
             )
         )
@@ -10646,7 +10669,7 @@ async def send_available_discovery_batch(ctx, batch):
         else:
             view = discord.ui.View(timeout=None)
             view.add_item(discord.ui.Button(
-                label="▶ Watch in Jellyfin",
+                label="â–¶ Watch in Jellyfin",
                 style=discord.ButtonStyle.link,
                 url=jellyfin.watch_url(jellyfin_item["Id"]),
             ))
@@ -10918,9 +10941,9 @@ async def send_ratings(ctx, *, page=1):
     visible = rows[start:start + page_size]
     lines = [
         (
-            f"**{row['title']} ({row['year'] or '????'})** — "
+            f"**{row['title']} ({row['year'] or '????'})** â€” "
             f"{row['rating']}/10"
-            + (" • Trakt synced" if row["trakt_synced"] else "")
+            + (" â€¢ Trakt synced" if row["trakt_synced"] else "")
         )
         for row in visible
     ]
@@ -12160,7 +12183,7 @@ async def status(
 
             view.add_item(
                 discord.ui.Button(
-                    label="▶ Watch in Jellyfin",
+                    label="â–¶ Watch in Jellyfin",
                     style=discord.ButtonStyle.link,
                     url=jellyfin.watch_url(
                         item["Id"]

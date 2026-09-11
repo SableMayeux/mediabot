@@ -82,7 +82,8 @@ class ProposalView(OwnerView):
     def __init__(self, *, action, fields, **kwargs):
         super().__init__(**kwargs)
         self.action = action
-        self.fields = {**fields, "request_id": str(uuid.uuid4())}
+        self.fields = dict(fields)
+        self.fields.setdefault("request_id", str(uuid.uuid4()))
         self.completed = False
         label = "Create event" if action == "create_event" else "Complete task" if action == "complete_task" else "Create task"
         button = discord.ui.Button(label=label, style=discord.ButtonStyle.success)

@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock
 
-from mediabot.ui.local_ai import FollowupModal, LocalChatView, append_prompt
+from mediabot.ui.local_ai import FollowupModal, LocalChatView, append_prompt, conversation_embed
 
 
 def interaction(user=42,guild=None):
@@ -44,7 +44,7 @@ class LocalAIUITests(unittest.IsolatedAsyncioTestCase):
   self.assertEqual(view.history,[]);self.assertIsNone(view.active_request);self.assertTrue(view.is_finished())
   view.service.cancel.assert_awaited_once_with(identity)
   self.assertIsNone(view.message.edit.await_args.kwargs['view'])
-  self.assertFalse(any(call.kwargs.get('embed') for call in view.message.edit.await_args_list))
+  self.assertFalse(any(call.kwargs.get('embed') and call.kwargs['embed'].description in ('Late private response', 'Should not appear') for call in view.message.edit.await_args_list))
  async def test_public_generation_is_bound_to_actor_guild_and_channel(self):
   view=self.view(owner=False,guild=10);view.private=False;view.channel_id=20;view.authorize=AsyncMock(return_value=True)
   view.message=SimpleNamespace(guild=SimpleNamespace(id=10),channel=SimpleNamespace(id=20),edit=AsyncMock())
@@ -86,7 +86,7 @@ class LocalAIUITests(unittest.IsolatedAsyncioTestCase):
   release.set();await task
   view.service.cancel.assert_awaited_once_with(identity)
   self.assertEqual(view.history,[])
-  self.assertFalse(any(call.kwargs.get('embed') for call in view.message.edit.await_args_list))
+  self.assertFalse(any(call.kwargs.get('embed') and call.kwargs['embed'].description in ('Late private response', 'Should not appear') for call in view.message.edit.await_args_list))
   self.assertTrue(event.followup.send.await_args.kwargs['ephemeral'])
  async def test_old_cancel_button_cannot_cancel_new_request(self):
   view=self.view();view.active_request='old';view.rebuild()
@@ -113,5 +113,45 @@ class LocalAIUITests(unittest.IsolatedAsyncioTestCase):
   messages=append_prompt(history,'Current question')
   self.assertEqual(history,original);self.assertEqual(messages[0]['role'],'user');self.assertEqual(messages[-1]['content'],'Current question')
   self.assertLessEqual(len(messages),12);self.assertLessEqual(sum(len(item['content'].encode()) for item in messages),3000)
+
+ async def test_full_private_question_and_embed_limit(self):
+  prompt='a'*2990+' last words'
+  prompt=prompt[:3000]
+  embed=conversation_embed(prompt,'b'*3900)
+  self.assertEqual(''.join(f.value for f in embed.fields),prompt)
+  self.assertLessEqual(len(embed),6000)
+  view=self.view();await view.generate(prompt)
+  final=[c.kwargs['embed'] for c in view.message.edit.await_args_list if c.kwargs.get('embed')][-1]
+  self.assertEqual(''.join(f.value for f in final.fields),prompt)
+
+ async def test_followups_preserve_previous_question_and_answer(self):
+  view=self.view();old=view.message
+  newer=SimpleNamespace(guild=None,edit=AsyncMock())
+  old.reply=AsyncMock(return_value=newer)
+  await view.generate('Original question')
+  count=len(old.edit.await_args_list)
+  await view.generate('Followup')
+  self.assertIs(view.message,newer)
+  self.assertEqual([c.kwargs for c in old.edit.await_args_list[count:]],[{'view':None}])
+  self.assertEqual(view.history[0]['content'],'Original question')
+
+ async def test_failed_followup_delivery_keeps_old_turn_and_does_not_infer(self):
+  import discord
+  view=self.view();old=view.message
+  await view.generate('Keep this')
+  old.reply=AsyncMock(side_effect=discord.Forbidden(SimpleNamespace(status=403,reason='Forbidden'),'closed'))
+  view.service.chat.reset_mock();count=len(old.edit.await_args_list)
+  await view.generate('Do not overwrite',interaction())
+  view.service.chat.assert_not_awaited()
+  self.assertTrue(all('embed' not in c.kwargs and 'content' not in c.kwargs for c in old.edit.await_args_list[count:]))
+
+ async def test_new_topic_keeps_old_transcript_but_clears_model_context(self):
+  view=self.view();old=view.message
+  old.reply=AsyncMock(return_value=SimpleNamespace(guild=None,edit=AsyncMock()))
+  await view.generate('Old topic')
+  await view.fresh(interaction())
+  await view.generate('New topic')
+  self.assertEqual(view.service.chat.await_args.args[1],[{'role':'user','content':'New topic'}])
+  self.assertIsNot(view.message,old)
 
 if __name__=='__main__':unittest.main()

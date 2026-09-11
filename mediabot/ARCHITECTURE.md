@@ -522,8 +522,17 @@ answer. Discord still stores messages. The bot reaches only an authenticated tex
 unauthenticated model network. The gateway restricts model/context/output,
 checks a host GPU monitor, yields to competing media activity, and unloads the
 model after each request. Cancellation uses the same request UUID. Personal
-note retrieval, external search, and model-driven task changes are not enabled.
+note retrieval and external search are not enabled. Only owner-only `$think --auto`
+opts into a single source-quoted, undated task after the raw capture is saved.
+Strict output validation rejects invented titles and additional fields. The
+existing Life gateway validates the owner and returns a durable receipt; an
+unconfirmed task retains the same request UUID and payload for manual retry.
+Plain `$think` remains capture-only. Chat itself cannot change tasks.
 
 Both clients initialize lazily. A gateway outage leaves raw capture and the
 household media services operational. Container secret mounts are distinct;
 the bot has no Nextcloud administrative credential or Docker socket.
+
+Chat follow-ups move controls to a new message and preserve earlier exchanges.
+Private guild chat copies the entire question to DM before deleting its source;
+no controls are attached until the deletion gate passes.

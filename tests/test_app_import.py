@@ -24,7 +24,7 @@ class AppImportTests(unittest.TestCase):
             import app
             from mediabot.providers.seerr import SeerrProvider
 
-            self.assertEqual(app.BOT_VERSION, "2.4.0")
+            self.assertEqual(app.BOT_VERSION, "2.5.0")
             compose_path = Path(
                 os.environ.get(
                     "MEDIABOT_COMPOSE_PATH",
