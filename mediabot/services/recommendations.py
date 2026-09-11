@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from mediabot.services.discovery import DiscoverOptions, DiscoveryService
+from mediabot.services.recommendation_auto import rank_candidates
 
 
 @dataclass(frozen=True)
@@ -62,7 +63,7 @@ class RecommendationService:
     def _candidate_key(item: dict[str, Any]) -> tuple[str, int]:
         return (str(item.get("mediaType")), int(item.get("id") or 0))
 
-    def _select_ranked(self, entries, count: int):
+    def _select_ranked(self, entries, count: int, rank_order=None):
         selected = []
         remaining = list(entries)
         uncovered = {
@@ -77,7 +78,8 @@ class RecommendationService:
                 remaining,
                 key=lambda entry: (
                     len(set(entry[3]) & uncovered),
-                    entry[0],
+                    (-rank_order[self._candidate_key(entry[1])]
+                     if rank_order is not None else entry[0]),
                 ),
             )
             covered = set(best[3]) & uncovered
@@ -113,6 +115,7 @@ class RecommendationService:
         trakt_items: list[dict[str, Any]] | None = None,
         trakt_ratings: list[dict[str, Any]] | None = None,
         trakt_available: bool = False,
+        ai_model=None,
     ) -> RecommendationBatch | None:
         options = self.discovery.parse_discover(raw)
         candidates, genre_filter = await self.discovery.candidate_pool(
@@ -338,7 +341,16 @@ class RecommendationService:
 
         scored.sort(key=lambda entry: entry[0], reverse=True)
 
-        selector = self._select_random if options.randomize else self._select_ranked
+        ai_status = None
+        rank_order = None
+        if ai_model is not None:
+            scored, ai_status = await rank_candidates(ai_model, scored)
+            if ai_status.startswith('ranked '):
+                rank_order = {self._candidate_key(entry[1]): index
+                              for index, entry in enumerate(scored)}
+
+        selector = self._select_random if options.randomize else (
+            lambda entries, count: self._select_ranked(entries, count, rank_order))
         by_type = {
             media_type: [
                 entry
@@ -377,7 +389,10 @@ class RecommendationService:
                 ]
                 selected.extend(selector(leftovers, options.count - len(selected)))
 
-            selected.sort(key=lambda entry: entry[0], reverse=True)
+            if rank_order is None:
+                selected.sort(key=lambda entry: entry[0], reverse=True)
+            else:
+                selected.sort(key=lambda entry: rank_order[self._candidate_key(entry[1])])
         else:
             selected = selector(scored, options.count)
 
@@ -404,5 +419,6 @@ class RecommendationService:
                 "jellyfin": jellyfin_count,
                 "trakt": len(trakt_ranks),
                 "trakt_available": bool(trakt_available),
+                **({'local_ai': ai_status} if ai_status is not None else {}),
             },
         )

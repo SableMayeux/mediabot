@@ -128,6 +128,37 @@ class PrivateLifeCommandTests(unittest.IsolatedAsyncioTestCase):
             await app.mediabot_help.callback(ctx, topic="torrent")
             self.assertIn("only in the configured server", ctx.reply.call_args.args[0])
 
+    async def test_help_matches_auto_features_and_admin_owner_boundaries(self):
+        ctx=self.context(SimpleNamespace(id=10))
+        ctx.author.guild_permissions=SimpleNamespace(administrator=True)
+        with patch.object(app.bot, 'is_owner', AsyncMock(return_value=False)):
+            await app.mediabot_help.callback(ctx,topic='admin')
+            rendered=str(ctx.reply.call_args.kwargs['embed'].to_dict())
+            self.assertNotIn('$admin logs',rendered)
+            self.assertNotIn('$admin link',rendered)
+            self.assertIn('$admin reports',rendered)
+            await app.mediabot_help.callback(ctx,topic='admin logs')
+            self.assertIn('not available',ctx.reply.call_args.args[0])
+            await app.mediabot_help.callback(ctx,topic='recommend')
+            self.assertIn('--auto',str(ctx.reply.call_args.kwargs['embed'].to_dict()))
+        ctx=self.context()
+        with patch.object(app.bot,'is_owner',AsyncMock(return_value=True)):
+            await app.mediabot_help.callback(ctx)
+            rendered=str(ctx.reply.call_args.kwargs['embed'].to_dict())
+            self.assertIn('--auto attempts one source-quoted task',rendered)
+            self.assertIn('currently require the configured server',rendered)
+
+    async def test_complete_owner_help_fits_discord_embed_limits(self):
+        ctx=self.context(SimpleNamespace(id=10))
+        ctx.author.guild_permissions=SimpleNamespace(administrator=True)
+        with patch.object(app.bot,'is_owner',AsyncMock(return_value=True)):
+            await app.mediabot_help.callback(ctx,topic='all')
+        for call in ctx.reply.call_args_list:
+            embed=call.kwargs['embed']
+            self.assertLessEqual(len(embed),6000)
+            self.assertLessEqual(len(embed.fields),25)
+            self.assertTrue(all(len(field.value)<=1024 for field in embed.fields))
+
     async def test_flag_without_question_only_shows_usage(self):
         ctx = self.context()
         with patch.object(app, "LocalChatView") as factory:

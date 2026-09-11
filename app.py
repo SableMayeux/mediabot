@@ -90,6 +90,7 @@ from mediabot.services.discovery import (
     DiscoveryUsageError,
 )
 from mediabot.services.recommendations import RecommendationService
+from mediabot.services.recommendation_auto import extract_auto_option
 from mediabot.services.reports import (
     REPORT_CATEGORY_LABELS,
     ReportCategory,
@@ -152,7 +153,7 @@ PREFIX = "$"
 
 OWNER_DM_COMMANDS = frozenset({"think", "life"})
 
-BOT_VERSION = "2.5.0"
+BOT_VERSION = "2.6.0"
 
 # discord.py normally wraps non-successful API responses in HTTPException, but
 # aiohttp connection failures can escape directly before Discord returns a
@@ -4530,6 +4531,9 @@ class RecommendationCardView(RecommendationCandidateView):
             else "Highest-ranked eligible result."
         )
         state_lines = [random_text]
+        ai_status = self.signals.get('local_ai') if self.signals else None
+        if ai_status:
+            state_lines = [f"Local model: {ai_status}. Provider facts below remain unchanged."]
 
         if reason:
             state_lines.append(f"**Why:** {reason}")
@@ -9635,7 +9639,7 @@ COMMAND_USAGE = {
     "think": "think [--auto] <anything on your mind>",
     "torrent": "torrent <movie|tv|music|game|app|other> <magnet link>",
     "discover": "discover [movie|show] [genres] [--count N] [--top N] [--random]",
-    "recommend": "recommend [movie|show] [genres] [--count N] [--top N] [--random]",
+    "recommend": "recommend [movie|show] [genres] [--count N] [--top N] [--random | --auto]",
     "rate": "rate [title and year] [1-10]",
     "ratings": "ratings [page]",
     "status": "status <title or #request>",
@@ -9682,7 +9686,8 @@ def walk_command_tree(
     command,
     *,
     prefix="$",
-    depth=0
+    depth=0,
+    visible=lambda command: True,
 ):
     indent = "    " * depth
 
@@ -9700,7 +9705,7 @@ def walk_command_tree(
         commands.Group
     ):
         children = sorted(
-            command.commands,
+            [child for child in command.commands if visible(child)],
             key=lambda child: child.name
         )
 
@@ -9709,7 +9714,8 @@ def walk_command_tree(
                 walk_command_tree(
                     child,
                     prefix=prefix,
-                    depth=depth + 1
+                    depth=depth + 1,
+                    visible=visible,
                 )
             )
 
@@ -9734,6 +9740,15 @@ async def mediabot_help(
     permissions = getattr(ctx.author, "guild_permissions", None)
     is_administrator = bool(getattr(permissions, "administrator", False))
     is_bot_owner = await bot.is_owner(ctx.author)
+    def visible_to_account(command):
+        # Inspect owner-check metadata instead of running checks, because the
+        # global torrent intake check deliberately deletes the source message.
+        lineage = [command, *command.parents]
+        if any(node.name == 'admin' for node in lineage) and not is_administrator:
+            return False
+        return is_bot_owner or not any(
+            getattr(check, '__qualname__', '') == 'is_owner.<locals>.predicate'
+            for node in lineage for check in node.checks)
     if ctx.guild is None:
         dm_commands = {"help", "ask"} | (OWNER_DM_COMMANDS if is_bot_owner else set())
         command = bot.get_command(normalized_topic) if normalized_topic else None
@@ -9743,14 +9758,14 @@ async def mediabot_help(
                 return
             await ctx.reply(f"`{command_usage(command, prefix)}`\n{command_description(command)}")
             return
-        lines = [f"`{prefix}ask <question>` - local conversation here in DM (server members)",
+        lines = [f"`{prefix}ask <question>` - local conversation here in DM (current server members)",
                  f"`{prefix}help <command>` - command details"]
         if is_bot_owner:
-            lines += [f"`{prefix}think [--auto] <text>` - save your private raw capture",
+            lines += [f"`{prefix}think [--auto] <text>` - save your private raw capture; --auto attempts one source-quoted task",
                       f"`{prefix}life inbox` - your captures and confirmed task/event creation",
                       f"`{prefix}life tasks` - your Nextcloud tasks and completion"]
         embed = discord.Embed(title="MediaBot in DMs", description="\n".join(lines), color=discord.Color.blurple())
-        embed.add_field(name="In the server", value="`$ask` answers in the channel. `$ask --private <question>` moves the answer to a DM. Media requests and torrent review use the configured server.", inline=False)
+        embed.add_field(name="In the server", value="`$ask` answers in the channel. `$ask --private <question>` moves the answer to a DM. `$recommend --auto` optionally ranks provider suggestions with the local model. Media commands and torrent review currently require the configured server; an account link does not enable them in DMs.", inline=False)
         await ctx.reply(embed=embed)
         return
     can_use_torrent = is_bot_owner or is_administrator
@@ -9791,6 +9806,9 @@ async def mediabot_help(
         if command.qualified_name.split()[0] == "admin" and not is_administrator:
             await ctx.reply("Administrator commands are not available to this account.")
             return
+        if not visible_to_account(command):
+            await ctx.reply("That command is not available to this account. Use `$help` for available commands.")
+            return
 
         requested_name = normalized_topic or command.qualified_name
         embed = discord.Embed(
@@ -9814,7 +9832,7 @@ async def mediabot_help(
             commands.Group
         ):
             children = sorted(
-                command.commands,
+                [child for child in command.commands if visible_to_account(child)],
                 key=lambda child: child.name
             )
 
@@ -9878,7 +9896,7 @@ async def mediabot_help(
             utility_lines.append(f"`{prefix}admin` - administrator tools")
         if is_bot_owner:
             utility_lines.append(
-                f"`{prefix}think [--auto] <text>` - save a private raw capture"
+                f"`{prefix}think [--auto] <text>` - save a private raw capture; optionally create one source-quoted task"
             )
         if can_use_torrent:
             utility_lines.append(
@@ -9898,12 +9916,14 @@ async def mediabot_help(
     if normalized_topic != "all":
         embed.add_field(name="Local conversation", value=f"`{prefix}ask <question>` - answer in this channel\n`{prefix}ask --private <question>` - answer privately in DM", inline=False)
         if is_bot_owner:
-            embed.add_field(name="Your private Life workspace", value=f"`{prefix}think [--auto] <text>` - capture a thought\n`{prefix}life inbox` / `{prefix}life tasks` - captures, tasks and confirmed actions", inline=False)
+            embed.add_field(name="Your private Life workspace", value=f"`{prefix}think [--auto] <text>` - save first; optionally classify one task\n`{prefix}life inbox` / `{prefix}life tasks` - captures, tasks and confirmed actions\nThese commands also work in your DM. Life storage is currently owner-only.", inline=False)
+        if is_bot_owner or is_administrator:
+            embed.add_field(name="Torrent file approval", value=f"`{prefix}torrent review` - choose a job, select files, approve, then check progress and its download path. Games, apps and other manual downloads wait for this approval. Completed manual downloads stay at that path; they are not automatically imported into Jellyfin.", inline=False)
         embed.add_field(
             name="Movies and shows",
             value=(
                 f"`{prefix}request <title>` - request something specific\n"
-                f"`{prefix}recommend [genres]` - find something new for you\n"
+                f"`{prefix}recommend [genres] [--auto]` - find something new for you\n"
                 f"`{prefix}discover [genres]` - browse what is playable now\n"
                 f"`{prefix}new` - see what was recently added\n"
                 f"`{prefix}report <title>` - report a playback problem"
@@ -9936,7 +9956,10 @@ async def mediabot_help(
             value=(
                 "**Discover** only shows media already in Jellyfin. "
                 "**Recommend** shows unseen media that can be requested.\n"
-                "Add `--random` to either one and `--count 3` for several."
+                "Add `--random` to either one and `--count 3` for several. "
+                "`$recommend --auto` lets the local model rank up to six real provider candidates; "
+                "facts stay provider-sourced and unavailable AI falls back to standard ranking. "
+                "Media commands currently run in the server."
             ),
             inline=False,
         )
@@ -9954,10 +9977,12 @@ async def mediabot_help(
             command
             for command in bot.commands
             if (
-                not command.hidden
+                (not command.hidden or is_bot_owner
+                 or (command.name == 'torrent' and can_use_torrent))
                 and command.name
                 not in command.aliases
                 and (command.name != "admin" or is_administrator)
+                and visible_to_account(command)
             )
         ],
         key=lambda command: command.name
@@ -9969,7 +9994,8 @@ async def mediabot_help(
         rendered.extend(
             walk_command_tree(
                 command,
-                prefix=prefix
+                prefix=prefix,
+                visible=visible_to_account
             )
         )
 
@@ -10010,6 +10036,11 @@ async def mediabot_help(
             if index == 1
             else f"Commands continued ({index})"
         )
+
+        if len(embed) + len(title) + len(chunk) > 5700 or len(embed.fields) >= 20:
+            embed.set_footer(text=f"More commands follow. Use {prefix}help <command> for details.")
+            await ctx.reply(embed=embed)
+            embed = discord.Embed(title="MediaBot commands (continued)", color=discord.Color.blurple())
 
         embed.add_field(
             name=title,
@@ -10056,6 +10087,8 @@ async def ping(ctx):
     hidden=True,
     help=(
         "Save a raw thought immediately to the private Life inbox. "
+        "Add --auto before the thought to classify one task; the task title must "
+        "quote your thought and no dates or reminders are invented. "
         "Only the bot owner can use this command."
     ),
 )
@@ -10195,8 +10228,10 @@ async def life(ctx, section: str = "inbox"):
     help=(
         "Privately enqueue a movie, TV, music, game, application, or other magnet "
         "through the VPN quarantine gate. Games, applications, and other payloads "
-        "stay stopped for manual review. Use `$torrent review` for private owner/admin "
-        "file selection, approval, progress, and recovery. Requires a linked media request account for intake."
+        "stay stopped until file selection and explicit owner/admin approval. "
+        "Use `$torrent review` for private file selection, approval, progress, "
+        "download path and recovery. Completed manual downloads stay at that path, "
+        "without automatic Jellyfin import. Requires a linked media request account for intake."
     ),
 )
 async def torrent(ctx, category: str = "", *, magnet: str = ""):
@@ -10748,17 +10783,30 @@ async def configured_taste_user(ctx):
     help=(
         "Rank unseen, requestable titles from your ratings and any connected "
         "server taste sources. Genres support implicit AND, plaintext `and`/`or`, "
-        "`&&`/`||`, and parentheses. Usage: $recommend [movie|show] [expression] "
-        "[--count N] [--top N] [--random]"
+        "`&&`/`||`, and parentheses. "
+        "Add --auto for optional local ranking of up to six provider candidates, "
+        "with provider-sourced explanations and standard ranking on failure. "
+        "Usage: $recommend [movie|show] [expression] "
+        "[--count N] [--top N] [--random | --auto]"
     ),
 )
 async def recommend_media(ctx, *, filters: str = ""):
-    normalized = " ".join(filters.split())
+    filtered, automatic = extract_auto_option(filters)
+    normalized = " ".join(filtered.split())
     if (
         str(ctx.invoked_with).casefold() in {"randomrequest", "rr"}
         and "--random" not in normalized
     ):
         normalized = (normalized + " --random").strip()
+    if automatic:
+        try:
+            options = discovery.parse_discover(normalized)
+        except DiscoveryUsageError as exc:
+            await ctx.reply(str(exc))
+            return
+        if options.randomize:
+            await ctx.reply("Choose `$recommend --auto` for local model ranking or `--random` for random sampling. These modes cannot be combined.")
+            return
     local_ratings = ratings_for_user(ctx.author.id)
     jellyfin_items = []
     trakt_items = []
@@ -10823,6 +10871,7 @@ async def recommend_media(ctx, *, filters: str = ""):
                 trakt_items=trakt_items,
                 trakt_ratings=trakt_ratings,
                 trakt_available=trakt_available,
+                **({'ai_model': local_ai} if automatic else {}),
             )
 
             if batch:
@@ -10841,7 +10890,7 @@ async def recommend_media(ctx, *, filters: str = ""):
         await ctx.reply(
             f"{exc}\n\n"
             "Usage: `$recommend [movie|show] [genre expression] [--count N] "
-            "[--top N] [--random]`"
+            "[--top N] [--random | --auto]`"
         )
         return
     except Exception as exc:

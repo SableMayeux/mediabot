@@ -7,6 +7,34 @@ and this project uses semantic version numbers.
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-09-11
+
+### Added
+
+- Opt-in `$recommend --auto` ranks a bounded shortlist of existing provider
+  candidates using summarized Trakt, rating and taste evidence. Model output
+  must be an exact permutation of candidate indices. Titles, IDs and displayed
+  explanations remain provider-derived, and unavailable or invalid inference
+  retains standard ranking. Existing exclusions and request confirmation remain.
+- Capture outcome logging records IDs and result codes without private thought
+  text, so note classifications can be distinguished from unavailable services
+  and unconfirmed task writes.
+
+### Fixed
+
+- Recognize imperative task fragments containing unfamiliar abbreviations in
+  `$think --auto`. Explicit leading uncertainty and example framing abstain
+  before inference; task titles still require an exact source quote and no
+  dates or reminders are inferred.
+- Show torrent selected size, full payload size, download progress and location
+  separately. Zero selected bytes no longer imply a completed download. Explain
+  that manual jobs need `$torrent review` approval and remain at the displayed
+  download path after completion, without automatic Jellyfin import.
+- Align server and DM help with actual command access and current AI options.
+  Hide owner-only administrator subcommands from other administrators. Media
+  commands remain in the configured server; Life storage remains owner-only.
+  Split complete command help across messages to stay within Discord limits.
+
 ## [2.5.0] - 2026-09-10
 
 ### Added

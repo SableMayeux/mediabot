@@ -5,7 +5,7 @@ stack. It gives household users one small, consistent command surface while
 leaving media search, approval, acquisition, and playback with the services
 that already own those jobs.
 
-Current source version: **2.5.0**
+Current source version: **2.6.0**
 
 The 1.x household-media command model remains a compatibility contract. The
 2.x line adds private and guarded workflows around that stable core without
@@ -63,7 +63,7 @@ The default prefix is `$`.
 | `$request <title> [year]` | Search for an exact movie or show, then choose seasons for TV. |
 | `$music <artist and track>` | Page through track matches and request the exact song. |
 | `$discover [movie\|show] [genres]` | Browse media already playable in Jellyfin. |
-| `$recommend [movie\|show] [genres]` | Rank unseen media that can be requested. |
+| `$recommend [movie\|show] [genres] [--auto]` | Rank unseen requestable media; optionally use the local model on provider candidates. |
 | `$rate <title> <1-10>` | Choose an exact title and save a durable rating. Run `$rate` alone to list ratings. |
 | `$status <title or #request>` | Reconcile library, request, episode, and music state. |
 | `$report <title> [SxxExx]` | File a playback-problem report for exact Jellyfin media. |
@@ -199,8 +199,9 @@ its local 1-10 rating store authoritative.
 - Optional Jellyfin, Sonarr, and SoulSync API credentials.
 
 MediaBot refuses to start without at least one trusted guild in
-`ALLOWED_GUILD_IDS`. Direct messages are rejected except for the owner's
-private `$think` capture, and the bot leaves guilds outside the allowlist.
+`ALLOWED_GUILD_IDS`. DMs support `$help`, current server members' `$ask`, and
+the owner's `$think`/`$life`. Media commands still require the configured
+server. The bot leaves guilds outside the allowlist.
 
 ## Configuration
 
@@ -289,8 +290,8 @@ The repository uses the standard library `unittest` runner:
 python -m pip check
 python -m compileall -q app.py mediabot scripts tests
 python -m unittest discover -s tests -q
-test -x scripts/deploy_v250.sh
-sh -n scripts/deploy_v250.sh
+test -x scripts/deploy_v260.sh
+sh -n scripts/deploy_v260.sh
 ```
 
 The GitHub Actions workflow runs the same dependency, compilation, deployer
@@ -298,7 +299,7 @@ syntax, and full unit-test gates on Python 3.13.
 
 ## Deployment note
 
-`scripts/deploy_v250.sh` is a guarded, transactional deployer for the current
+`scripts/deploy_v260.sh` is a guarded, transactional deployer for the current
 Compose layout. It backs up the runtime and SQLite database, verifies hashes
 and database integrity, performs security and health gates, and rolls back on
 failure. It is intentionally opinionated: audit its target paths, service
@@ -337,6 +338,29 @@ No dates or reminders are inferred, even when a thought mentions relative time.
 Set those explicitly in Life or Nextcloud. A small local model can miss a real
 task; it is not a guaranteed classifier. An unconfirmed write retains the same
 request ID for the displayed retry. Plain `$think` still only captures.
+
+Imperative fragments and unfamiliar abbreviations are accepted as task
+language. Explicit leading uncertainty (`maybe`, `what if`, `I might`) and
+example framing abstain before inference. The classifier can still make
+mistakes; this is not an accuracy guarantee. Capture IDs and outcome codes
+are logged for diagnosis without logging the thought or proposed task title.
+
+`$recommend --auto --count 3` optionally lets the local model rank up to six
+already eligible provider candidates. Trakt rank, community rating and
+existing taste evidence are summarized within the same 3,000-byte context
+limit. The model can return only a permutation of those candidate indices;
+displayed titles, IDs and explanations remain provider-derived. Existing
+watched/rated exclusions, genre constraints, movie/show balance and request
+confirmation remain in force. Invalid output, unavailable inference or an
+oversized prompt retain standard ranking. This option does not guarantee
+better recommendations and cannot be combined with `--random`.
+
+`$discover`/`$random` still browse already playable Jellyfin media and do not
+accept `--auto`. Use `$recommend --auto` for the Trakt/taste-backed option.
+The flag does not enable arbitrary tools, execute commands, or expose private
+Life data to other users. Both server and DM `$help` describe the commands
+available in that location; owner-only administrator subcommands stay hidden
+from other administrators.
 
 Chat cards retain the full question. Follow-ups and new topics create separate
 messages rather than replacing the preceding exchange. Context is temporary,

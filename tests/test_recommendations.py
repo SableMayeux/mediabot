@@ -1,4 +1,6 @@
 import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from mediabot.services.discovery import DiscoveryService
 from mediabot.services.recommendations import RecommendationService
@@ -133,6 +135,26 @@ class BalancedSeerr:
 
 
 class RecommendationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_optional_model_changes_pick_without_inventing_provider_facts(self):
+        service = RecommendationService(DiscoveryService(FakeSeerr(), default_pool_size=3, max_pool_size=10))
+        baseline = await service.recommend('movie', ratings=[])
+        model = SimpleNamespace(enabled=True, chat=AsyncMock(return_value={'text':'{"order":[2,0,1]}'}))
+        result = await service.recommend('movie', ratings=[], ai_model=model)
+        self.assertNotEqual(result.items[0]['id'], baseline.items[0]['id'])
+        source = (await service.recommend('movie --count 3', ratings=[])).items
+        self.assertIn(result.items[0], source)
+        self.assertIn('ranked 3', result.signals['local_ai'])
+        self.assertNotIn('local_ai', baseline.signals)
+        self.assertEqual(result.reasons, {('movie', result.items[0]['id']):
+            (await service.recommend('movie --count 3', ratings=[])).reasons[('movie', result.items[0]['id'])]})
+
+    async def test_optional_model_cannot_restore_excluded_watched_or_rated_titles(self):
+        service = RecommendationService(DiscoveryService(FakeSeerr(), default_pool_size=3, max_pool_size=10))
+        model = SimpleNamespace(enabled=True, chat=AsyncMock(return_value={'text':'{"order":[1,0]}'}))
+        result = await service.recommend('movie', ratings=[{'media_type':'movie','tmdb_id':3,'rating':8,'genres':'Horror'}], ai_model=model)
+        self.assertNotIn('Already Rated', model.chat.call_args.args[1][0]['content'])
+        self.assertNotEqual(result.items[0]['id'], 3)
+
     async def test_rating_affinity_beats_popularity_and_excludes_rated_title(self):
         discovery = DiscoveryService(
             FakeSeerr(),

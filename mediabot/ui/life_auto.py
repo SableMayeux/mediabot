@@ -1,10 +1,14 @@
 """Private opt-in task classification after a durable raw capture."""
+import logging
+
 import discord
 
 from mediabot.services.life_auto import classify_capture, task_fields
 from mediabot.services.life_workflow import LifeWorkflowError
 from mediabot.services.local_ai import LocalAIError
 from mediabot.ui.life_workflow import LifeLauncher, ProposalView, safe
+
+logger = logging.getLogger(__name__)
 
 
 async def promote_automatically(ctx, *, bot, model, service, capture, thought):
@@ -17,6 +21,7 @@ async def promote_automatically(ctx, *, bot, model, service, capture, thought):
         message = await send(text + " Checking whether this clearly describes a task...",
             allowed_mentions=discord.AllowedMentions.none())
     except discord.HTTPException:
+        logger.info('life_auto capture=%s outcome=dm_unavailable', capture.capture_id)
         if launcher:
             launcher.stop()
         await ctx.send(text + " I could not open a DM. No automatic action was submitted; use `$life`.")
@@ -27,20 +32,24 @@ async def promote_automatically(ctx, *, bot, model, service, capture, thought):
         except discord.HTTPException:
             pass  # Raw capture and any gateway receipt remain authoritative.
     if not model.enabled or not service.enabled:
+        logger.info('life_auto capture=%s outcome=service_disabled', capture.capture_id)
         await update(text + " Automatic tasks are unavailable. Your raw thought is saved.", view=launcher)
         return
     try:
         title = await classify_capture(model, thought)
     except LocalAIError as exc:
+        logger.info('life_auto capture=%s outcome=model_unavailable_or_invalid', capture.capture_id)
         await update(text + " No task was submitted. " + str(exc), view=launcher)
         return
     if title is None:
+        logger.info('life_auto capture=%s outcome=classified_note', capture.capture_id)
         await update(text + " Kept as a note. No clear task was identified; nothing else was created.", view=launcher)
         return
     fields = task_fields(capture.capture_id, title)
     try:
         await service.request("create_task", actor_id=ctx.author.id, **fields)
     except LifeWorkflowError as exc:
+        logger.info('life_auto capture=%s outcome=task_unconfirmed', capture.capture_id)
         proposal = ProposalView(action="create_task", fields=fields, **options)
         proposal.children[0].label = "Retry same task"
         await update(text + " Nextcloud did not confirm the task. " + str(exc)
@@ -48,6 +57,7 @@ async def promote_automatically(ctx, *, bot, model, service, capture, thought):
         if launcher:
             launcher.stop()
         return
+    logger.info('life_auto capture=%s outcome=task_confirmed', capture.capture_id)
     embed = discord.Embed(title="Task created in Nextcloud", description=safe(title, 200))
     embed.add_field(name="Receipt", value=f"`{fields['request_id']}`", inline=False)
     embed.set_footer(text="Title quoted from your thought. No inferred dates or reminders. Original capture preserved.")

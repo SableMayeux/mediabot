@@ -114,6 +114,10 @@ class TorrentReviewView(discord.ui.View):
             limit = int(state.get("scan_limit_bytes", 95 * 1024 * 1024))
             skipped = sum(int(r.get("size", 0)) for r in chosen if int(r.get("size", 0)) > limit)
             embed.add_field(name="Selected download", value=f"{len(chosen)} of {len(rows)} files, {size_text(total)}", inline=False)
+            full_size = sum(int(r.get("size", 0)) for r in rows if r.get("selectable", True))
+            embed.add_field(name="Full torrent size", value=size_text(full_size), inline=True)
+            if not chosen:
+                embed.add_field(name="No files selected", value="Nothing will download until you select files. Zero selected bytes does not mean the torrent is empty or complete.", inline=False)
             page = rows[self.page * 20:(self.page + 1) * 20]
             lines = [f"{'[x]' if int(r['index']) in self.selected else '[ ]'} {safe_text(r.get('name', ''), 100)} ({size_text(r.get('size'))})" for r in page]
             chunks, chunk = [], ""
@@ -141,6 +145,13 @@ class TorrentReviewView(discord.ui.View):
             embed.add_field(name="Scan result", value=safe_text(scan.get("detail") or scan.get("status") or str(scan), 600), inline=False)
         if state.get("receipt"):
             embed.add_field(name="Download approval", value="Recorded and verified by the review service. Refresh for download and scan progress.", inline=False)
+        elif state.get("phase") == "ready":
+            embed.add_field(name="Start this download", value="Choose files, then press Approve selected download. Starting it directly in qBittorrent before approval causes an approval hold.", inline=False)
+        if state.get("save_path"):
+            embed.add_field(name="Download folder", value=(
+                f"{safe_text(state['save_path'], 400)}\n"
+                "Completed manual downloads stay here. Games and applications are not imported into Jellyfin."
+            ), inline=False)
         if state.get("live_state"):
             embed.add_field(name="Live progress", value=(
                 f"{safe_text(state['live_state'])}; downloaded {size_text(state.get('downloaded_bytes'))}; "

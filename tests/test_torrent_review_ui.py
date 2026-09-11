@@ -94,6 +94,17 @@ class TorrentReviewUITests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("21", [option.value for option in menu.options])
         self.assertEqual(view.selected, {0, 21, 41})
 
+    async def test_empty_selection_keeps_full_size_and_download_location_visible(self):
+        view = self.view()
+        view.absorb(status(selected_indexes=[], manifest_sha256="c" * 64,
+                           save_path="/data/torrents/quarantine/manual/games"))
+        fields = {field.name: field.value for field in view.embed().fields}
+        self.assertIn("0 of 2 files", fields["Selected download"])
+        self.assertEqual(fields["Full torrent size"], "100.0 MiB")
+        self.assertIn("does not mean", fields["No files selected"])
+        self.assertIn("Approve selected download", fields["Start this download"])
+        self.assertIn("/data/torrents/quarantine/manual/games", fields["Download folder"])
+
     async def test_manifest_change_resets_selection_to_new_server_selection(self):
         view = self.view()
         view.selected = {1}

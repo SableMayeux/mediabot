@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import discord
 
-from mediabot.services.life_auto import auto_prompt, decode_decision, task_fields
+from mediabot.services.life_auto import auto_prompt, classify_capture, decode_decision, task_fields
 from mediabot.services.local_ai import LocalAIError
 from mediabot.services.life_workflow import LifeWorkflowError
 from mediabot.ui.life_auto import promote_automatically
@@ -37,6 +37,19 @@ class DecisionTests(unittest.TestCase):
 
 
 class AutoUITests(unittest.IsolatedAsyncioTestCase):
+    async def test_explicit_uncertainty_or_examples_cannot_be_promoted_by_model(self):
+        model = SimpleNamespace(chat=AsyncMock(return_value={'text':'{"kind":"task","title":"review the documents"}'}))
+        for text in ('Maybe I could review the documents.', 'I might review the documents.',
+                     'What if I review the documents?', 'An example command is "review the documents".'):
+            self.assertIsNone(await classify_capture(model, text))
+        model.chat.assert_not_awaited()
+
+    async def test_imperative_with_unknown_names_keeps_source_words(self):
+        model = SimpleNamespace(chat=AsyncMock(return_value={'text':'{"kind":"task","title":"review xyz hooks into abc and zyx datasets"}'}))
+        original='review xyz hooks into abc and zyx datasets'
+        self.assertEqual(await classify_capture(model, original), original)
+        model.chat.assert_awaited_once()
+
     def setup_case(self, output, guild=None):
         message = SimpleNamespace(edit=AsyncMock())
         ctx = SimpleNamespace(guild=guild, author=SimpleNamespace(id=42, send=AsyncMock(return_value=message)),
@@ -59,6 +72,15 @@ class AutoUITests(unittest.IsolatedAsyncioTestCase):
             await promote_automatically(ctx, **kw)
             kw['service'].request.assert_not_awaited()
             message.edit.await_args.kwargs['view'].stop()
+
+    async def test_note_outcome_is_observable_without_logging_private_text(self):
+        ctx, message, kw = self.setup_case('{"kind":"note"}')
+        with self.assertLogs('mediabot.ui.life_auto', level='INFO') as logs:
+            await promote_automatically(ctx, **kw)
+        self.assertIn('outcome=classified_note', ' '.join(logs.output))
+        self.assertNotIn(kw['thought'], ' '.join(logs.output))
+        kw['service'].request.assert_not_awaited()
+        message.edit.await_args.kwargs['view'].stop()
 
     async def test_disabled_service_or_closed_dm_prevents_inference(self):
         ctx,message,kw=self.setup_case('{"kind":"task","title":"Call the mechanic"}')
