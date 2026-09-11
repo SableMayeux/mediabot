@@ -15,6 +15,7 @@ from enum import Enum, IntEnum
 from typing import Any, Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from mediabot.core.configuration import configured_timezone
 from mediabot.core.event_store import (
     EventConflictError,
     EventNotFoundError,
@@ -31,7 +32,7 @@ from mediabot.core.event_store import (
 from mediabot.events.presets.base import EventPresetSnapshot
 
 
-DEFAULT_EVENT_TIMEZONE = "America/Denver"
+DEFAULT_EVENT_TIMEZONE = configured_timezone("EVENT_TIMEZONE")
 MAX_EVENT_SCHEDULE_SLOTS = 31
 MAX_EVENT_TIME_OPTIONS = 25
 EVENT_REMINDER_START_GRACE = timedelta(minutes=15)

@@ -44,6 +44,7 @@ class EventServiceTests(unittest.TestCase):
             created_by_discord_id=3,
             name=name,
             vote_limit=vote_limit,
+            timezone_name="America/Denver",
         )
 
     def nominate(
@@ -495,10 +496,12 @@ class EventServiceTests(unittest.TestCase):
         tonight = restarted.tonight(
             discord_guild_id=41,
             reference=datetime(2026, 10, 15, 23, 55, tzinfo=DENVER),
+            timezone_name="America/Denver",
         )
         tomorrow = restarted.tonight(
             discord_guild_id=41,
             reference=datetime(2026, 10, 16, 0, 1, tzinfo=DENVER),
+            timezone_name="America/Denver",
         )
 
         self.assertEqual(len(tonight), 1)
@@ -507,7 +510,8 @@ class EventServiceTests(unittest.TestCase):
 
     def test_denver_day_bounds_respect_the_fall_dst_day(self):
         start, end = local_day_utc_bounds(
-            datetime(2026, 11, 1, 12, tzinfo=DENVER)
+            datetime(2026, 11, 1, 12, tzinfo=DENVER),
+            timezone_name="America/Denver",
         )
         self.assertEqual(end - start, timedelta(hours=25))
 

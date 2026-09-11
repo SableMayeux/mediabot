@@ -7,6 +7,56 @@ and this project uses semantic version numbers.
 
 ## [Unreleased]
 
+## [2.7.0] - 2026-09-11
+
+### Added
+
+- A standalone installation wizard with hidden credential prompts, private
+  configuration files, validated provider URLs, container-based authentication
+  checks, startup health checks and instance-specific status. It uses Python's
+  standard library on the host and asks for API credentials, not server passwords.
+- Portable Docker Compose with project-scoped persistent storage and a restricted
+  initializer for empty volumes. The bot runs as UID/GID 1000 with a read-only
+  root filesystem, without external networks, host bind mounts or gateway secrets.
+- Installation, account-linking, first-request, update, backup/restore and
+  troubleshooting guides, with an explicit command-access and optional-feature
+  matrix. Independent operators use separate bot applications and installations.
+- GPL-3.0-only licensing, including the license text in the source and image.
+- A clean-install CI gate that builds the shipping image with synthetic
+  credentials, initializes the real application twice and verifies retained
+  SQLite data, authenticated fixture transport and credential serialization.
+  Discord login is intercepted; production health must reject that offline state.
+  Tagged releases wait for both unit tests and this gate.
+
+### Changed
+
+- The default install requires Discord and Seerr. Jellyfin, Sonarr, SoulSync,
+  AI, Life workflow and torrent gateways are optional. Gateway servers remain
+  separately provisioned components, not bundled services or multi-user Life.
+- New installations use `TZ=UTC`, with explicit event/Life timezone overrides.
+  Empty browser URLs fall back to the provider's configured API URL; an absent
+  Nextcloud origin no longer exposes a private homelab address.
+
+### Fixed
+
+- Normalize application source permissions inside the image so a restrictive
+  host umask cannot prevent the unprivileged bot from importing its own code.
+- Refuse to overwrite existing configuration or replace an existing deployment's
+  different data mount. Rebuild both the bot and volume initializer on updates.
+- Create the configured raw-capture inbox during startup so integration status
+  does not fail merely because the owner has not captured a thought yet.
+
+### Migration
+
+- **Existing customized deployments:** the root `compose.yaml` now targets new
+  standalone installations. The previous homelab layout is preserved separately
+  in `deploy/compose.homelab.yaml`, with its explicit original timezone settings.
+  Follow `docs/INSTALL.md#existing-customized-deployments`; do not overlay the
+  two files or change project names to bypass the installer's data-mount guard.
+  Historical `deploy_v*.sh` scripts remain version-specific homelab tools.
+- Back up the configuration and database before an upgrade. No existing media,
+  data volumes, VPN configuration or gateway storage is migrated by this release.
+
 ## [2.6.0] - 2026-09-11
 
 ### Added

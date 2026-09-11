@@ -1,374 +1,85 @@
 # Dogginator MediaBot
 
-Dogginator MediaBot is a Discord-first orchestration layer for a personal media
-stack. It gives household users one small, consistent command surface while
-leaving media search, approval, acquisition, and playback with the services
-that already own those jobs.
+**Request media, find something to watch and organize a media night from Discord.**
+MediaBot connects your server to your existing media stack, with search cards,
+confirmation buttons, account-linked requests and progress receipts.
 
-Current source version: **2.6.0**
-
-The 1.x household-media command model remains a compatibility contract. The
-2.x line adds private and guarded workflows around that stable core without
-turning household commands into an administration console. See
-[ROADMAP.md](ROADMAP.md).
-
-## What it does
-
-- Searches and requests movies or specific TV seasons through Seerr.
-- Repairs exact missing episodes through Sonarr when a previously approved
-  season is only partially present.
-- Replies to completed request cards with a restricted `@requester` mention so
-  the person who asked for the title gets the availability notification.
-- Browses only media currently playable in Jellyfin with `$discover`.
-- Ranks unseen, requestable media with `$recommend`, using explicit 1-10
-  ratings and optional Jellyfin/Trakt taste signals.
-- Requests exact music tracks through SoulSync.
-- Reconciles video, episode, and music progress through one `$status` command.
-- Files exact Jellyfin playback reports into a guild-local administrator queue.
-- Runs reusable media-night ballots with title and availability voting,
-  editable schedules, Discord Scheduled Events, reminders, and history.
-- Cleans up abandoned interactive messages after five minutes while preserving
-  successful receipts.
-- Gives the bot owner a durable `$think` inbox for raw Markdown captures. A
-  thought is always saved before any future classification; it is not silently
-  promoted into a task.
-- Opens private `$life` capture/task views. Creating a Nextcloud task or event,
-  or completing a task, requires an explicit confirmation. Optional task
-  reminders are one-shot Nextcloud notifications, separate from due dates.
-- Runs `$ask <question>` for current members of the configured Discord server.
-  Replies appear in the originating channel; `$ask --private <question>` uses a
-  private DM. Requester-bound follow-ups stay in memory for ten minutes. The
-  model cannot search notes, browse the web, or change tasks. Discord retains
-  the messages. `$help` works in DMs and shows the appropriate command list.
-- Gives verified Discord accounts linked to a Seerr media identity a narrow
-  `$torrent <type> <magnet>` intake path for movies, TV, music, games,
-  applications, and other payloads. It removes the Discord source
-  message before submission and can reach only the VPN/quarantine gateway,
-  never qBittorrent's administrative API. The bot owner retains access without
-  needing a separate link. Games, applications, and other payloads remain
-  stopped in manual-review quarantine until explicit owner/admin approval.
-  `$torrent review` opens private file selection, bounded metadata progress,
-  cancel/retry, scan coverage, and evidence-gated owner hold recovery.
-
-MediaBot is deliberately not a replacement for Seerr, Jellyfin, Sonarr,
-Radarr, or SoulSync. The detailed provider boundaries and request lifecycles
-are documented in [mediabot/ARCHITECTURE.md](mediabot/ARCHITECTURE.md).
-
-## Command surface
-
-The default prefix is `$`.
-
-| Command | Purpose |
-| --- | --- |
-| `$request <title> [year]` | Search for an exact movie or show, then choose seasons for TV. |
-| `$music <artist and track>` | Page through track matches and request the exact song. |
-| `$discover [movie\|show] [genres]` | Browse media already playable in Jellyfin. |
-| `$recommend [movie\|show] [genres] [--auto]` | Rank unseen requestable media; optionally use the local model on provider candidates. |
-| `$rate <title> <1-10>` | Choose an exact title and save a durable rating. Run `$rate` alone to list ratings. |
-| `$status <title or #request>` | Reconcile library, request, episode, and music state. |
-| `$report <title> [SxxExx]` | File a playback-problem report for exact Jellyfin media. |
-| `$event` | Open the current event dashboard and its restart-safe controls. |
-| `$event create <name> [--votes N]` | Administrator: open a reusable media-night ballot. |
-| `$event nominate <title> [year]` | Search for and add one exact movie or show; this does not request it. |
-| `$event vote` | Open your title ballot. |
-| `$event time [YYYY-MM-DD HH:MM,...]` | Vote on proposed times, or let an administrator add times with selectors or text. |
-| `$event schedule [YYYY-MM-DD HH:MM,...]` | Administrator: preview and publish the ranked lineup. |
-| `$event reschedule <id> [YYYY-MM-DD HH:MM,...]` | Administrator: move an existing schedule without rebuilding its ballot. |
-| `$event reopen <id>` | Administrator: return a scheduled event to nominations and voting. |
-| `$event tonight` | Show the guild's scheduled lineup for the current local day. |
-| `$event history` | Show recent completed, cancelled, and archived events. |
-| `$event complete\|cancel\|archive <id>` | Administrator: close or soft-hide one event. |
-| `$event clear` | Administrator: complete expired schedules and archive terminal events. |
-| `$new [count]` | Show recently added Jellyfin media. |
-| `$help [command]` | Show the current user-facing command model and generated details. |
-
-Private Life utilities require the bot owner:
-`$think <text>` (alias `$capture`) is owner-only and writes a private raw note.
-`$life` opens a private capture selector; `$life tasks` opens current Nextcloud
-tasks. A selected capture offers **Make task** and **Plan event**, each followed
-by a confirmation. Enter dates as `YYYY-MM-DD HH:MM` in America/Denver, or use an
-explicit ISO UTC offset. A task due date is separate from its optional reminder.
-`$think` and `$life` are owner-only and also work in the owner's DMs.
-
-`$ask <question>` replies in the originating channel. `$ask --private <question>`
-copies the question to DM before removing the guild command; failed deletion or
-blocked DMs prevent inference. Asking directly in DM replies there. Chat is
-available to current members of the configured server and the owner. New chat
-commands are limited to two per user per 30 seconds; the gateway still permits
-only one generation at a time. Controls recheck membership and belong only to
-the requester, in the original destination. Each conversation has separate
-temporary history. Public follow-up questions and answers are visible in the
-channel; use a new private conversation for private follow-ups. `$help` works
-in DMs; other household media commands still use the configured server.
-
-`$torrent <movie|tv|music|game|app|other> <magnet>` accepts one BTIH magnet from the owner or a
-Discord account explicitly linked to a Seerr media identity. Torrent intake is
-available only in the configured Media Discord because MediaBot cannot delete
-the user's DM source; if guild-message deletion fails, nothing is queued.
-
-The required type is routing and safety metadata, not a free-form tag. Movie,
-TV, and music aliases enter fixed scanner-managed paths. `game`/`games`,
-`app`/`application`/`software`, and `other` enter fixed manual-review paths and
-stay stopped for owner/admin review. Use **Review privately** on the intake
-receipt or `$torrent review`, choose a request, inspect its manifest and scan
-coverage, select files, then choose **Approve selected download**. Metadata
-acquisition has a bounded temporary permit and displays progress. **Cancel
-review** stops metadata acquisition; it does not delete payloads. **Recover
-hold** is a separate owner-only action available only for a recorded,
-validated approval-lifecycle hold; recovery never starts the download.
-
-Completed manual payloads stop for scanning. Selected files over the configured
-95 MiB ceiling are skipped and reported as unscanned; archive coverage has
-additional limits. Partial scans can permit seeding in manual quarantine,
-which is separate from automatic import and does not establish safe execution.
-The current quarantine mount does not enforce `noexec`. Approval and scan
-receipts remain in the root-owned review service; the bot receives no qBit
-credential. Refresh the private review to see download, scan, and seeding state.
-Successful intake receipts remain; abandoned queue launchers expire after five
-minutes. The music
-route validates audio and seeds the result, but no current importer moves it
-into the Navidrome library; `$music` through SoulSync remains the automatic
-song-request path.
-
-`$random` remains a compatibility alias for `$discover --random`.
-`$randomrequest` and `$rr` alias `$recommend --random`; `$ratings` aliases
-`$rate` with no arguments. They are aliases, not separate product concepts.
-
-Genre expressions default to AND and also accept `and`/`&&`, `or`/`||`,
-commas, and parentheses. For example:
+Current source version: **2.7.0**. Get stable source releases and change notes from
+[Releases](https://github.com/SableMayeux/mediabot/releases).
 
 ```text
-$recommend Fantasy Romance --count 4
-$recommend (Fantasy and Romance) or Action --count 3
-$discover Comedy --random --count 3
+$request Interstellar 2014       Search, choose the exact title, confirm
+$discover movie Comedy          Browse something already playable
+$recommend --count 3            Find something new to request
+$status #123                    Check a tracked request
+$event                          Vote on the next media night
+$help                           See what your account can use
 ```
 
-### Event workflow
+## Run it on your server
 
-An administrator creates an event, members nominate exact Seerr results, and
-members vote independently on titles and every proposed time they can attend.
-The durable dashboard exposes **Vote titles**, **Vote times**, and administrator
-management controls, so the useful path does not require memorizing every
-subcommand.
+The supported starting point is **Linux, Docker Engine with Compose 2.20+, and an
+existing Seerr installation**. You create your own Discord bot application and
+connect it to your own media services. No remote server passwords are required.
 
-Discord does not provide bots with a native calendar-picker component.
-MediaBot uses date and time selectors for the common path plus a **Custom**
-modal for an exact local `YYYY-MM-DD HH:MM` value. Plain-text commands remain
-available for accessibility and fast administration. Times are saved in UTC
-and rendered with Discord timestamps so each reader sees their own timezone.
-
-Scheduling closes voting for now rather than making the ballot immutable. An
-administrator can reschedule it or reopen voting. Each future slot is mirrored
-to a native Discord Scheduled Event when the bot has event permissions, and a
-restart-safe worker sends 24-hour, 1-hour, and start-time reminders. Completed
-and cancelled events remain auditable in history; archive and clear only hide
-them from the active dashboard. Unfinished transient cards still disappear
-after five minutes, while the event dashboard and successful actions persist.
-
-## Architecture
-
-```text
-Discord command or button
-          |
-          v
-   MediaBot service layer -----> SQLite state and reconciliation
-          |
-          +-----> Seerr: search, approval, requests, TMDB metadata
-          +-----> Jellyfin: playable library, history, links, reports
-          +-----> Sonarr: exact episode inventory and partial repair
-          +-----> SoulSync: music search and acquisition
-          +-----> Markdown inbox: immutable owner thought captures
-          `-----> Torrent intake: token-scoped gateway -> VPN quarantine
-```
-
-Seerr is the required video request broker. Jellyfin, Sonarr, and SoulSync are
-optional integrations that enable their corresponding commands and richer
-reconciliation. Trakt enrichment is optional and uses the Jellyfin Trakt
-plugin for the single configured owner taste profile; MediaBot always keeps
-its local 1-10 rating store authoritative.
-
-## Requirements
-
-- Docker Engine with Docker Compose v2 (recommended), or Python 3.13.
-- A Discord bot application with **Message Content Intent** and **Server
-  Members Intent** enabled. Grant **Create Events** and **Manage Events** for
-  native Discord Scheduled Event publishing, edits, and cleanup.
-- A Seerr instance and API key.
-- A writable persistent data directory for SQLite, logs, and the runtime health
-  heartbeat.
-- Optional Jellyfin, Sonarr, and SoulSync API credentials.
-
-MediaBot refuses to start without at least one trusted guild in
-`ALLOWED_GUILD_IDS`. DMs support `$help`, current server members' `$ask`, and
-the owner's `$think`/`$life`. Media commands still require the configured
-server. The bot leaves guilds outside the allowlist.
-
-## Configuration
-
-Copy `.env.example` to `.env`, replace every placeholder, and review every URL
-for your environment. At minimum, configure:
-
-```dotenv
-DISCORD_TOKEN=replace-with-discord-bot-token
-ALLOWED_GUILD_IDS=123456789012345678
-
-SEERR_API_KEY=replace-with-seerr-api-key
-SEERR_URL=http://host.docker.internal:5055
-SEERR_PUBLIC_URL=https://requests.example.com
-```
-
-`ALLOWED_GUILD_IDS` accepts a comma-separated list of positive Discord guild
-IDs. Internal provider URLs are used by the container; `*_PUBLIC_URL` values
-must be browser-reachable links suitable for Discord users.
-
-Optional integration groups:
-
-| Integration | Variables |
-| --- | --- |
-| Jellyfin | `JELLYFIN_URL`, `JELLYFIN_API_KEY`, `JELLYFIN_PUBLIC_URL`, `JELLYFIN_TASTE_USER` |
-| Sonarr | `SONARR_URL`, `SONARR_API_KEY` |
-| SoulSync | `SOULSYNC_URL`, `SOULSYNC_API_KEY`, `SOULSYNC_PUBLIC_URL` |
-| Private capture | `LIFE_CAPTURE_PATH` |
-| Torrent intake | `TORRENT_INTAKE_URL`, `TORRENT_INTAKE_TOKEN_PATH` |
-
-Operational settings include `DB_PATH`, `LOG_PATH`, `LOG_MAX_BYTES`,
-`LOG_BACKUP_COUNT`, `RUNTIME_HEALTH_PATH`, `REQUEST_UI_TIMEOUT`,
-`JELLYFIN_POLL_SECONDS`, and `MEDIA_SUBMISSION_DRAIN_SECONDS`. The Compose
-defaults expect these writable files beneath `/app/data`.
-
-Event operations use `EVENT_RECONCILE_SECONDS` (worker interval, minimum 30),
-`EVENT_COMPLETION_GRACE_HOURS` (delay after the last slot before automatic
-completion, minimum 1), and `EVENT_REMINDER_MENTION` (an optional role ID or
-`<@&ROLE_ID>`; blank by default for quiet reminders). Because role IDs belong
-to one Discord guild, the ping setting is accepted only when exactly one
-`ALLOWED_GUILD_ID` is configured; multi-guild deployments must leave it blank.
-Arbitrary user mentions and `@everyone` are rejected.
-
-Never commit `.env`, a database, logs, runtime health snapshots, recovery
-bundles, or provider credentials.
-
-## Run with Docker Compose
-
-The container runs as UID/GID `1000:1000` with a read-only root filesystem.
-Prepare the bind mount with matching write access before startup:
+1. Follow [Install MediaBot](docs/INSTALL.md) to create/invite the bot and gather
+   the Discord token, server ID and Seerr API settings.
+2. Clone this repository and check out a published stable release.
+3. Configure, validate connectivity and start:
 
 ```sh
-cp .env.example .env
-# Edit .env and replace every environment-specific value.
-mkdir -p data
-chown 1000:1000 data
-
-docker compose build --pull
-docker compose up -d
-docker compose ps
-docker compose logs --tail 100 mediabot
+python3 scripts/setup.py
+python3 scripts/setup.py --check
+python3 scripts/setup.py --start
 ```
 
-The Compose healthcheck validates the versioned runtime heartbeat rather than
-merely checking whether a Python process exists.
+The setup tool needs Python 3.10+ and uses no extra Python packages. It creates
+your private `.env`, checks services from Docker and starts the bot with durable
+storage. It refuses to overwrite an existing configuration. The container
+supplies the bot's Python 3.13 runtime.
 
-## Run directly for development
+Once it is healthy, follow [Your first request](docs/USAGE.md#your-first-request)
+to link a Discord member to Seerr and submit a confirmed request. Give members
+[the user guide](docs/USAGE.md), not the installation checklist.
 
-```sh
-python3.13 -m venv .venv
-. .venv/bin/activate
-python -m pip install -r requirements.txt
-python -m pip check
+## Choose the features you need
 
-# Export the required environment variables, then:
-python app.py
-```
+| Feature | Required integration | Included in the basic setup? |
+| --- | --- | --- |
+| Movie/TV search, requests, recommendations, ratings, status and media-night ballots | Discord + existing Seerr | Yes |
+| Browse playable media, recent additions and playback reports | Existing Jellyfin | Optional wizard configuration |
+| Exact episode inventory and repair of incomplete approved seasons | Existing Sonarr | Optional wizard configuration |
+| Exact music-track requests and progress | Compatible SoulSync request API | Optional wizard configuration |
+| Private raw `$think` captures | Bot owner's persistent inbox | Available in the bot data volume |
+| `$life` task/calendar workflow | Separate Life gateway + Nextcloud | Advanced setup, owner-only |
+| `$ask`, `$think --auto`, `$recommend --auto` | Separate authenticated local AI gateway/model | Advanced setup; no model downloaded by the installer |
+| `$torrent` intake and manual approval | Separate VPN/quarantine/review gateway | Advanced setup; no qBittorrent or VPN installed here |
+| Multi-user Life, Home Assistant and voice devices | Additional services and enrollment | Not included in this installer |
 
-Set `DB_PATH`, `LOG_PATH`, and `RUNTIME_HEALTH_PATH` to writable local paths
-when running outside the container.
+Seerr remains responsible for video requests and approval. Jellyfin owns
+playback, Sonarr/Radarr own their acquisition workflows and SoulSync owns music
+acquisition. Optional integrations can be added after the basic request path
+works. A release number does not mean every companion service is installed.
 
-## Verification
+Use **one independent installation per independently administered media stack**.
+An installation can allow several trusted Discord servers, but they share its
+providers, credentials, account mappings and ratings. Adding a guild ID does
+not create an isolated tenant. Another server owner should deploy their own
+copy with their own application and services.
 
-The repository uses the standard library `unittest` runner:
+## Documentation
 
-```sh
-python -m pip check
-python -m compileall -q app.py mediabot scripts tests
-python -m unittest discover -s tests -q
-test -x scripts/deploy_v260.sh
-sh -n scripts/deploy_v260.sh
-```
+- [Install, configure, update, back up and troubleshoot](docs/INSTALL.md)
+- [Member and administrator walkthrough](docs/USAGE.md)
+- [Full command and integration reference](docs/REFERENCE.md)
+- [Provider boundaries and architecture](mediabot/ARCHITECTURE.md)
+- [Roadmap](ROADMAP.md), [changelog](CHANGELOG.md) and [security policy](SECURITY.md)
 
-The GitHub Actions workflow runs the same dependency, compilation, deployer
-syntax, and full unit-test gates on Python 3.13.
+The portable Compose configuration runs as an unprivileged user with a
+read-only root filesystem and a persistent named volume. It does not require
+the original operator's host paths, external networks or gateway credentials.
+Existing custom deployments should read the
+[migration note](docs/INSTALL.md#existing-customized-deployments) before changing
+their Compose configuration.
 
-## Deployment note
-
-`scripts/deploy_v260.sh` is a guarded, transactional deployer for the current
-Compose layout. It backs up the runtime and SQLite database, verifies hashes
-and database integrity, performs security and health gates, and rolls back on
-failure. It is intentionally opinionated: audit its target paths, service
-name, ownership model, and staging contract before using it on another host.
-
-The supplied 2.3 Compose deployment requires already commissioned Life and
-local-text gateways, their mode-0600 uid-1000 secret files, and the external
-`life_intake` and `local-ai_frontend` networks. The Life gateway must have an
-independent owner allowlist and Nextcloud app password. The local model needs
-its supervised GPU monitor. Verify an independent backup restoration before
-commissioning these services. The bot's release gates check authenticated
-connectivity and isolation; raw capture remains available during later gateway
-outages. No model inference or personal-data mutation runs as a deployment gate.
-
-To prove rollback before a release, run the same staged deployment with
-`MEDIABOT_ROLLBACK_DRILL=1`. The candidate must become healthy first; the
-deployer then deliberately fails and restores the verified pre-deploy runtime,
-database, environment, ownership, and container state. A drill exits non-zero
-by design and must confirm that the original runtime, configuration, database,
-and metadata were restored before a real deployment is attempted.
-
-## Security
-
-Read [SECURITY.md](SECURITY.md) before exposing the bot or any provider API.
-Keep `.env` protected, grant the Discord bot only the permissions it needs,
-and keep provider management endpoints on a trusted network or authenticated
-reverse proxy.
-
-### Optional automatic Life task
-
-Use `$think --auto I need to call the mechanic` to save the raw capture and ask
-for one automatic task decision. An accepted task title must be quoted from the
-thought. The result stays private. Ambiguous text, a note decision, invalid model
-output, or unavailable services leaves the raw capture for `$life` review.
-No dates or reminders are inferred, even when a thought mentions relative time.
-Set those explicitly in Life or Nextcloud. A small local model can miss a real
-task; it is not a guaranteed classifier. An unconfirmed write retains the same
-request ID for the displayed retry. Plain `$think` still only captures.
-
-Imperative fragments and unfamiliar abbreviations are accepted as task
-language. Explicit leading uncertainty (`maybe`, `what if`, `I might`) and
-example framing abstain before inference. The classifier can still make
-mistakes; this is not an accuracy guarantee. Capture IDs and outcome codes
-are logged for diagnosis without logging the thought or proposed task title.
-
-`$recommend --auto --count 3` optionally lets the local model rank up to six
-already eligible provider candidates. Trakt rank, community rating and
-existing taste evidence are summarized within the same 3,000-byte context
-limit. The model can return only a permutation of those candidate indices;
-displayed titles, IDs and explanations remain provider-derived. Existing
-watched/rated exclusions, genre constraints, movie/show balance and request
-confirmation remain in force. Invalid output, unavailable inference or an
-oversized prompt retain standard ranking. This option does not guarantee
-better recommendations and cannot be combined with `--random`.
-
-`$discover`/`$random` still browse already playable Jellyfin media and do not
-accept `--auto`. Use `$recommend --auto` for the Trakt/taste-backed option.
-The flag does not enable arbitrary tools, execute commands, or expose private
-Life data to other users. Both server and DM `$help` describe the commands
-available in that location; owner-only administrator subcommands stay hidden
-from other administrators.
-
-Chat cards retain the full question. Follow-ups and new topics create separate
-messages rather than replacing the preceding exchange. Context is temporary,
-limited to 12 messages and 3000 UTF-8 bytes, and expires after ten minutes.
-Discord retains the messages. New topic clears model context only. There is no
-persistent conversational memory or automatic channel reading.
-
-Stable version tags publish GitHub releases automatically only after tag CI
-passes. Release notes come from the matching changelog entry; a missing entry
-fails publication. Companion services and live deployment are separately
-verified and are not implied merely by creating a release page.
+Licensed under [GNU GPL version 3 only](LICENSE), `GPL-3.0-only`.

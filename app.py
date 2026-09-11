@@ -18,6 +18,7 @@ import aiohttp
 import discord
 from discord.ext import commands, tasks
 
+from mediabot.core.configuration import validate_core_configuration
 from mediabot.core.database import (
     init_tracking_db,
     track_request,
@@ -120,14 +121,14 @@ from mediabot.events.presets import build_spooktober_preset
 # CONFIG
 # ============================================================
 
-DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
+DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN", "").strip()
 
 SEERR_URL = os.environ.get(
     "SEERR_URL",
-    "http://host.docker.internal:5055"
+    ""
 ).rstrip("/")
 
-SEERR_API_KEY = os.environ["SEERR_API_KEY"]
+SEERR_API_KEY = os.environ.get("SEERR_API_KEY", "").strip()
 
 DB_PATH = os.environ.get(
     "DB_PATH",
@@ -153,7 +154,7 @@ PREFIX = "$"
 
 OWNER_DM_COMMANDS = frozenset({"think", "life"})
 
-BOT_VERSION = "2.6.0"
+BOT_VERSION = "2.7.0"
 
 # discord.py normally wraps non-successful API responses in HTTPException, but
 # aiohttp connection failures can escape directly before Discord returns a
@@ -252,10 +253,10 @@ JELLYFIN_TASTE_USER = os.environ.get(
 # This is intentionally separate from SEERR_URL.
 # SEERR_URL may be an internal Docker address that humans
 # cannot open in their browser.
-SEERR_PUBLIC_URL = os.environ.get(
+SEERR_PUBLIC_URL = (os.environ.get(
     "SEERR_PUBLIC_URL",
-    SEERR_URL
-).rstrip("/")
+    ""
+).strip() or SEERR_URL).rstrip("/")
 
 # Search / confirmation UI lifetime.
 REQUEST_UI_TIMEOUT = int(
@@ -13464,8 +13465,14 @@ async def run_client_until_shutdown(client, token, shutdown_requested):
 
 
 async def main():
-    if not ALLOWED_GUILD_IDS:
-        raise RuntimeError("ALLOWED_GUILD_IDS must name at least one trusted server.")
+    validate_core_configuration(
+        discord_token=DISCORD_TOKEN,
+        seerr_url=SEERR_URL,
+        seerr_api_key=SEERR_API_KEY,
+        guild_ids=ALLOWED_GUILD_IDS,
+    )
+    if life_capture is not None:
+        life_capture.inbox_path.mkdir(mode=0o700, parents=True, exist_ok=True)
     init_db()
     init_tracking_db()
     recovery = recover_accepted_media_request_intents()

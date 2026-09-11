@@ -14,13 +14,13 @@ class JellyfinProvider:
 
         self.base_url = os.environ.get(
             "JELLYFIN_URL",
-            "http://host.docker.internal:8096"
-        ).rstrip("/")
+            ""
+        ).strip().rstrip("/")
 
-        self.public_url = os.environ.get(
+        self.public_url = (os.environ.get(
             "JELLYFIN_PUBLIC_URL",
-            self.base_url
-        ).rstrip("/")
+            ""
+        ).strip() or self.base_url).rstrip("/")
 
         self.api_key = os.environ.get(
             "JELLYFIN_API_KEY",
@@ -34,7 +34,7 @@ class JellyfinProvider:
     def enabled(self):
 
         return bool(
-            self.api_key
+            self.base_url and self.api_key
         )
 
     async def start(self):

@@ -7,12 +7,13 @@ from datetime import datetime
 from typing import Iterable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from mediabot.core.configuration import configured_timezone
 from mediabot.events.presets.base import EventPresetSnapshot
 
 
 SPOOKTOBER_PRESET_KEY = "spooktober"
 SPOOKTOBER_PRESET_VERSION = "1"
-DEFAULT_EVENT_TIMEZONE = "America/Denver"
+DEFAULT_EVENT_TIMEZONE = configured_timezone("EVENT_TIMEZONE")
 
 
 def build_spooktober_preset(

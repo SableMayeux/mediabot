@@ -37,12 +37,11 @@ class SoulSyncProvider(Provider):
         timeout: float = 30.0,
     ) -> None:
         self.base_url = (
-            base_url
-            or os.environ.get(
+            base_url if base_url is not None else os.environ.get(
                 "SOULSYNC_URL",
-                "http://host.docker.internal:8008",
+                "",
             )
-        ).rstrip("/")
+        ).strip().rstrip("/")
         self.api_key = (
             api_key
             if api_key is not None

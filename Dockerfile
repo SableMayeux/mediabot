@@ -10,7 +10,13 @@ RUN pip install --no-cache-dir --no-compile -r requirements.txt \
     && python -m pip check
 
 COPY app.py .
+COPY LICENSE .
 COPY mediabot ./mediabot
+
+# Host umask must not make root-owned application source unreadable by UID 1000.
+RUN chmod 0644 app.py LICENSE \
+    && find mediabot -type d -exec chmod 0755 {} + \
+    && find mediabot -type f -exec chmod 0644 {} +
 
 USER 1000:1000
 

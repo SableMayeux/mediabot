@@ -29,19 +29,20 @@ trusted network or behind an authenticated reverse proxy.
 The torrent command is limited to the bot owner and Discord accounts explicitly
 linked to a Seerr media identity. It must never connect to qBittorrent directly.
 Keep its token-scoped intake gateway on an internal Docker network, reserve a
-dedicated qBittorrent API key for that gateway, and preserve qBittorrent's VPN
+dedicated set of qBittorrent credentials for that gateway, and preserve qBittorrent's VPN
 interface binding plus quarantine scanner. Treat a magnet URL as sensitive:
 MediaBot deletes the source message before account validation or processing and
 redacts magnets from logs, but deletion is not retroactive disclosure recovery.
 
 Torrent types are a fixed allowlist. Movies, TV, and music may pass their
-media-only scanner; games, applications, and other payloads must stay stopped
-under isolated manual-review quarantine. The guard blocks starting them until
-the backing mount has a verified non-executable isolation policy and a
-dedicated completed-payload scan/release workflow. Manual-review routes never
-feed Radarr, Sonarr, or an automatic
-software importer. They are not a claim that executable content is safe, and
-the stack neither auto-executes nor auto-deletes it.
+media-only scanner. Games, applications, and other manual payloads require
+explicit file approval through the gateway before download, then stop for the
+configured completed-payload scan workflow. Inspect scan coverage: oversized
+files and some archive content may remain unscanned. A quarantine directory
+does not itself enforce a non-executable mount policy, and approval or partial
+scanning is not a safe-execution guarantee. Manual-review routes never feed
+Radarr, Sonarr or an automatic software importer. The stack neither
+auto-executes nor auto-deletes the payload.
 
 Private `$think` captures may contain personal data. Store the Markdown inbox
 on trusted local storage with restrictive permissions, mirror it only into a

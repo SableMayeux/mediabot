@@ -1,7 +1,25 @@
+# Portable install. Existing Sable homelab: deploy/compose.homelab.yaml instead.
 services:
+  data-init:
+    build: .
+    restart: "no"
+    user: "0:0"
+    read_only: true
+    network_mode: none
+    pids_limit: 16
+    mem_limit: 64m
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+    security_opt:
+      - no-new-privileges:true
+    command: ["python", "-m", "mediabot.core.initialize_volume"]
+    volumes:
+      - mediabot_data:/app/data
+
   mediabot:
     build: .
-    container_name: mediabot
     restart: unless-stopped
     init: true
     user: "1000:1000"
@@ -9,43 +27,27 @@ services:
     pids_limit: 128
     mem_limit: 512m
     stop_grace_period: 30s
-
+    depends_on:
+      data-init:
+        condition: service_completed_successfully
     cap_drop:
       - ALL
-
     security_opt:
       - no-new-privileges:true
-
     env_file:
       - .env
-
     environment:
       HOME: /tmp
-      LIFE_CAPTURE_PATH: /life-vault/Life/Inbox
-      TORRENT_INTAKE_URL: http://torrent-intake:8765
-      TORRENT_INTAKE_TOKEN_PATH: /run/secrets/torrent_intake_token
-      LIFE_GATEWAY_URL: http://life-gateway:8091
-      LIFE_GATEWAY_TOKEN_PATH: /run/secrets/life_gateway_token
-      LIFE_TIMEZONE: America/Denver
-      NEXTCLOUD_PUBLIC_ORIGIN: https://mediaserver.tail9c0ded.ts.net:8443
-      LOCAL_AI_URL: http://local-ai-gateway:8080
-      LOCAL_AI_TOKEN_PATH: /run/secrets/local_ai_token
-
-    secrets:
-      - torrent_intake_token
-      - life_gateway_token
-      - local_ai_token
-
+      DISCORD_TOKEN: ${DISCORD_TOKEN:?Set DISCORD_TOKEN in .env using scripts/setup.py}
+      ALLOWED_GUILD_IDS: ${ALLOWED_GUILD_IDS:?Set ALLOWED_GUILD_IDS in .env using scripts/setup.py}
+      SEERR_URL: ${SEERR_URL:?Set SEERR_URL in .env using scripts/setup.py}
+      SEERR_API_KEY: ${SEERR_API_KEY:?Set SEERR_API_KEY in .env using scripts/setup.py}
     volumes:
-      - ./data:/app/data
-      - /opt/stacks/life/vault/Life/Inbox:/life-vault/Life/Inbox
-
+      - mediabot_data:/app/data
     tmpfs:
       - /tmp:size=64m,mode=1777
-
     extra_hosts:
       - "host.docker.internal:host-gateway"
-
     healthcheck:
       test:
         - CMD
@@ -55,41 +57,18 @@ services:
         - --path
         - /app/data/runtime-health.json
         - --version
-        - 2.6.0
+        - 2.7.0
         - --max-age
         - "120"
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 45s
-
-    networks:
-      - default
-      - torrent_intake
-      - life_intake
-      - local_ai_frontend
-
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
 
-secrets:
-  torrent_intake_token:
-    file: /opt/stacks/torrent/secrets/torrent_intake_token
-  life_gateway_token:
-    file: /opt/stacks/life-workflows/secrets/life_gateway_token
-  local_ai_token:
-    file: /opt/stacks/local-ai/secrets/local_ai_token
-
-networks:
-  torrent_intake:
-    external: true
-    name: dogginator_torrent_intake
-  life_intake:
-    external: true
-    name: life_intake
-  local_ai_frontend:
-    external: true
-    name: local-ai_frontend
+volumes:
+  mediabot_data:

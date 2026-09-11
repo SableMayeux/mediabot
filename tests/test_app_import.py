@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 
 class AppImportTests(unittest.TestCase):
@@ -24,7 +24,7 @@ class AppImportTests(unittest.TestCase):
             import app
             from mediabot.providers.seerr import SeerrProvider
 
-            self.assertEqual(app.BOT_VERSION, "2.6.0")
+            self.assertEqual(app.BOT_VERSION, "2.7.0")
             compose_path = Path(
                 os.environ.get(
                     "MEDIABOT_COMPOSE_PATH",
@@ -277,6 +277,9 @@ class RankedBatchStateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_partial_inventory_reports_exact_missing_episodes(self):
         app = self.load_app()
+        provider_url = patch.object(app.jellyfin, "base_url", "http://jellyfin.test")
+        provider_url.start()
+        self.addCleanup(provider_url.stop)
         previous_key = app.jellyfin.api_key
         previous_find = app.jellyfin.find_by_tmdb
         previous_numbers = app.jellyfin.series_season_episode_numbers
@@ -312,6 +315,9 @@ class RankedBatchStateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_sonarr_inventory_makes_exact_gaps_requestable(self):
         app = self.load_app()
+        provider_url = patch.object(app.sonarr, "base_url", "http://sonarr.test")
+        provider_url.start()
+        self.addCleanup(provider_url.stop)
         previous_key = app.sonarr.api_key
         previous_inventory = app.sonarr.series_inventory
         app.sonarr.api_key = "test-key"
@@ -351,6 +357,9 @@ class RankedBatchStateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_empty_unapproved_sonarr_season_stays_in_seerr(self):
         app = self.load_app()
+        provider_url = patch.object(app.sonarr, "base_url", "http://sonarr.test")
+        provider_url.start()
+        self.addCleanup(provider_url.stop)
         previous_key = app.sonarr.api_key
         previous_inventory = app.sonarr.series_inventory
         app.sonarr.api_key = "test-key"
@@ -393,6 +402,9 @@ class RankedBatchStateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_monitored_upcoming_episode_is_not_offered_as_repair(self):
         app = self.load_app()
+        provider_url = patch.object(app.sonarr, "base_url", "http://sonarr.test")
+        provider_url.start()
+        self.addCleanup(provider_url.stop)
         previous_key = app.sonarr.api_key
         previous_inventory = app.sonarr.series_inventory
         app.sonarr.api_key = "test-key"

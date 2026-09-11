@@ -32,10 +32,37 @@ current media-provider boundary:
 
 ## Later 2.x: broader integrations
 
-Version 2.3 provides explicit capture-to-task/event promotion, task completion,
-one-shot task reminders, and private local text conversation. Retrieval and
-web search remain separate milestones. Local conversation cannot execute
-the Life operations.
+The 2.x line provides explicit capture-to-task/event promotion, task completion,
+one-shot task reminders and local text conversation. Version 2.6 includes an
+opt-in, source-constrained task decision with `$think --auto` and optional
+provider-candidate reranking with `$recommend --auto`. These commands still
+require their separately commissioned gateways. Retrieval and web search remain
+separate milestones. Local conversation cannot execute Life operations.
+
+## Make the release usable on another server
+
+Independent operators should be able to follow the repository without access
+to the original homelab or its maintainer:
+
+- the portable Compose installation starts with Discord and Seerr, with no
+  mandatory Life, AI or torrent gateway, private host path or external network;
+- the setup CLI gathers credentials locally, validates the configured services
+  from a container and starts an installation with its own durable data volume;
+- installation and member guides explain account linking, the first successful
+  request, updates, backups, permissions and real failure states;
+- advanced integrations remain explicit additions, with their deployment and
+  credential boundaries documented instead of implied by a command list.
+
+This supports independent copies for independent media stacks. Shared
+multi-tenant hosting is not implemented. Multiple trusted guilds in one copy
+share its provider configuration, account links and ratings.
+
+Further work includes a complete deployable package for each advanced gateway,
+tested upgrade/restore paths, and multi-user Life enrollment with isolated
+storage and authorization. Home Assistant and voice-device setup remain
+separate from installing the Discord bot.
+
+## Integration candidates
 
 Candidate integrations include:
 
@@ -45,9 +72,9 @@ Candidate integrations include:
 - photo/document search and other user-owned libraries.
 
 Explicit note-to-task promotion into the chosen CalDAV task store and
-calendar/reminder actions come before LLM classification. An LLM may help
-classify or draft those actions later, but it must never be the only copy of a
-capture or create commitments without a visible receipt.
+calendar/reminder actions remain available without LLM classification. Optional
+classification must never become the only copy of a capture or create
+commitments without a visible receipt.
 
 These are not automatic 1.x dependencies. Each integration must be optional,
 least-privileged, independently observable, and safe when either side is

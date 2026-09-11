@@ -9,6 +9,7 @@ scripts/
 .env.*
 !.env.example
 data/
+backups/
 *.pre-*
 *.tgz
 *.tar.gz

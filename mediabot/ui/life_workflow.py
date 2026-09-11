@@ -10,11 +10,12 @@ from zoneinfo import ZoneInfo
 
 import discord
 
+from mediabot.core.configuration import configured_timezone
 from mediabot.services.life_workflow import LifeWorkflowError
 
 
-LOCAL_ZONE = os.getenv("LIFE_TIMEZONE", "America/Denver")
-NEXTCLOUD_ORIGIN = os.getenv("NEXTCLOUD_PUBLIC_ORIGIN", "http://10.0.0.53:8082").rstrip("/")
+LOCAL_ZONE = configured_timezone("LIFE_TIMEZONE")
+NEXTCLOUD_ORIGIN = os.getenv("NEXTCLOUD_PUBLIC_ORIGIN", "").strip().rstrip("/")
 
 
 def safe(value, maximum=180):
@@ -225,7 +226,8 @@ class LifeView(OwnerView):
 
     def rebuild(self):
         self.clear_items()
-        self.add_item(discord.ui.Button(label="Open Nextcloud", url=NEXTCLOUD_ORIGIN + "/index.php/apps/" + ("tasks/" if self.mode == "tasks" else "notes/"), row=4))
+        if NEXTCLOUD_ORIGIN:
+            self.add_item(discord.ui.Button(label="Open Nextcloud", url=NEXTCLOUD_ORIGIN + "/index.php/apps/" + ("tasks/" if self.mode == "tasks" else "notes/"), row=4))
         for mode, label in (("captures", "Inbox"), ("tasks", "Tasks")):
             button = discord.ui.Button(label=label, style=discord.ButtonStyle.primary if self.mode == mode else discord.ButtonStyle.secondary, row=0)
             async def change(interaction, target=mode):

@@ -30,7 +30,7 @@ class SeerrProvider(Provider):
             base_url
             or os.environ.get(
                 "SEERR_URL",
-                "http://host.docker.internal:5055",
+                "",
             )
         ).rstrip("/")
         self.api_key = (

@@ -3,6 +3,7 @@
 !.env.example
 
 data/
+backups/
 __pycache__/
 *.pyc
 *.pyo

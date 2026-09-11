@@ -2,7 +2,7 @@ import asyncio
 from datetime import datetime
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import discord
 
@@ -20,6 +20,11 @@ def event(user=42, guild=10):
 
 
 class LocalTimeTests(unittest.TestCase):
+    def setUp(self):
+        configured_zone = patch("mediabot.ui.life_workflow.LOCAL_ZONE", "America/Denver")
+        configured_zone.start()
+        self.addCleanup(configured_zone.stop)
+
     def test_native_date_and_floating_time_do_not_invent_timezone(self):
         self.assertEqual(time_label("2026-09-12"), "2026-09-12")
         self.assertEqual(time_label("2026-09-12T14:30:00"), "2026-09-12 14:30 (time zone unspecified)")
@@ -35,6 +40,11 @@ class LocalTimeTests(unittest.TestCase):
 
 
 class LifeUITests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        configured_zone = patch("mediabot.ui.life_workflow.LOCAL_ZONE", "America/Denver")
+        configured_zone.start()
+        self.addCleanup(configured_zone.stop)
+
     def opts(self, owner=True):
         return dict(bot=SimpleNamespace(is_owner=AsyncMock(return_value=owner)),
             service=SimpleNamespace(request=AsyncMock()), actor_id=42, guild_id=10)
