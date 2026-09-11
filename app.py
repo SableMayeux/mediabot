@@ -60,6 +60,8 @@ from mediabot.providers.jellyfin import JellyfinProvider
 from mediabot.providers.seerr import (
     SeerrProvider,
     SeerrError,
+    matching_users,
+    user_display_name,
 )
 from mediabot.providers.soulsync import (
     SoulSyncProvider,
@@ -153,8 +155,9 @@ TORRENT_INTAKE_TOKEN_PATH = os.environ.get(
 PREFIX = "$"
 
 OWNER_DM_COMMANDS = frozenset({"think", "life"})
+ADMIN_DM_GUILDS = {}
 
-BOT_VERSION = "2.7.0"
+BOT_VERSION = "2.7.1"
 
 # discord.py normally wraps non-successful API responses in HTTPException, but
 # aiohttp connection failures can escape directly before Discord returns a
@@ -532,6 +535,10 @@ async def enforce_allowed_guild(ctx):
         setattr(ctx, "_torrent_source_deleted", True)
 
     if ctx.guild is None:
+        if command_name == "admin" or command_name.startswith("admin "):
+            # Every admin command has a separate current-member/admin check.
+            # DM transport alone never grants a guild or owner capability.
+            return True
         if command_name in {"help", "ask"}:
             # Help is public documentation. Ask has a separate current-server
             # membership check; this does not grant access to any Life command.
@@ -5745,16 +5752,21 @@ class AdminReportQueueView(LoggedView):
         records,
         command_message,
         initial_index=0,
+        dm_channel_id=None,
     ):
         super().__init__(timeout=REQUEST_UI_TIMEOUT)
         self.requester_id = int(requester_id)
         self.guild_id = int(guild_id)
+        self.dm_channel_id = int(dm_channel_id) if dm_channel_id is not None else None
         self.records = list(records)
         self.command_message = command_message
         self.message = None
         self.index = max(0, min(int(initial_index), len(self.records) - 1))
         self.finished = False
         self.submitting = False
+        self.action_lock = asyncio.Lock()
+        self.view_token = secrets.token_hex(6)
+        self.view_revision = 0
 
         self.previous_button = discord.ui.Button(
             label="Previous",
@@ -5803,6 +5815,12 @@ class AdminReportQueueView(LoggedView):
 
     def refresh_controls(self):
         current = self.current()
+        self.view_revision += 1
+        report_id = int((current or {}).get("report_id") or 0)
+        for action, button in (("previous", self.previous_button), ("next", self.next_button),
+                               ("in_progress", self.claim_button), ("resolved", self.resolve_button),
+                               ("dismissed", self.dismiss_button)):
+            button.custom_id = f"mb:adminreport:{self.view_token}:{report_id}:{self.view_revision}:{action}"
         self.previous_button.disabled = self.submitting or self.index <= 0
         self.next_button.disabled = (
             self.submitting or self.index >= len(self.records) - 1
@@ -5837,10 +5855,18 @@ class AdminReportQueueView(LoggedView):
 
     async def interaction_check(self, interaction):
         permissions = getattr(interaction.user, "guild_permissions", None)
+        authorized = False
+        if (self.dm_channel_id is not None and interaction.guild_id is None
+                and getattr(interaction, "channel_id", None) == self.dm_channel_id
+                and interaction.user.id == self.requester_id):
+            try:
+                authorized = await fetch_admin_scope(self.guild_id, interaction.user) is not None
+            except commands.CheckFailure:
+                authorized = False
         if (
-            interaction.user.id == self.requester_id
+            authorized or (self.dm_channel_id is None and interaction.user.id == self.requester_id
             and interaction.guild_id == self.guild_id
-            and bool(getattr(permissions, "administrator", False))
+            and bool(getattr(permissions, "administrator", False)))
         ):
             return await renew_transient_interaction(
                 interaction,
@@ -5852,7 +5878,20 @@ class AdminReportQueueView(LoggedView):
         )
         return False
 
+    async def accept_action(self, interaction, action):
+        if self.finished or self.submitting or self.action_lock.locked():
+            await interaction.response.send_message("This queue is updating. Wait for it to finish before using another control.", ephemeral=True)
+            return False
+        report_id = int((self.current() or {}).get("report_id") or 0)
+        expected = f"mb:adminreport:{self.view_token}:{report_id}:{self.view_revision}:{action}"
+        if (getattr(interaction, "data", None) or {}).get("custom_id") != expected:
+            await interaction.response.send_message("That control belongs to an older report view. Use the controls on the current report.", ephemeral=True)
+            return False
+        return True
+
     async def previous(self, interaction):
+        if not await self.accept_action(interaction, "previous"):
+            return
         async with self.action_lock:
             if self.index > 0:
                 self.index -= 1
@@ -5860,6 +5899,8 @@ class AdminReportQueueView(LoggedView):
             await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
     async def next(self, interaction):
+        if not await self.accept_action(interaction, "next"):
+            return
         async with self.action_lock:
             if self.index < len(self.records) - 1:
                 self.index += 1
@@ -5867,6 +5908,8 @@ class AdminReportQueueView(LoggedView):
             await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
     async def apply_status(self, interaction, status):
+        if not await self.accept_action(interaction, status):
+            return
         async with self.action_lock:
             current = self.current()
             if self.submitting or current is None:
@@ -9741,6 +9784,11 @@ async def mediabot_help(
     permissions = getattr(ctx.author, "guild_permissions", None)
     is_administrator = bool(getattr(permissions, "administrator", False))
     is_bot_owner = await bot.is_owner(ctx.author)
+    if ctx.guild is None:
+        try:
+            is_administrator = bool(await available_admin_scopes(ctx.author))
+        except commands.CheckFailure:
+            is_administrator = False
     def visible_to_account(command):
         # Inspect owner-check metadata instead of running checks, because the
         # global torrent intake check deliberately deletes the source message.
@@ -9752,12 +9800,22 @@ async def mediabot_help(
             for node in lineage for check in node.checks)
     if ctx.guild is None:
         dm_commands = {"help", "ask"} | (OWNER_DM_COMMANDS if is_bot_owner else set())
+        if is_administrator:
+            dm_commands |= {command.qualified_name for command in bot.walk_commands()
+                            if (command.qualified_name == "admin" or command.qualified_name.startswith("admin "))
+                            and visible_to_account(command)}
         command = bot.get_command(normalized_topic) if normalized_topic else None
         if normalized_topic and normalized_topic not in {"all", "advanced"}:
             if command is None or command.qualified_name not in dm_commands:
                 await ctx.reply("That command is available only in the configured server, or is not available to this account. Use `$help` for DM commands.")
                 return
-            await ctx.reply(f"`{command_usage(command, prefix)}`\n{command_description(command)}")
+            description = f"`{command_usage(command, prefix)}`\n{command_description(command)}"
+            if isinstance(command, commands.Group):
+                children = sorted((child for child in command.commands if visible_to_account(child)), key=lambda child: child.name)
+                description += "\n\n" + "\n".join(f"`{command_usage(child, prefix)}` - {command_description(child)}" for child in children)
+            if command.qualified_name == "admin" or command.qualified_name.startswith("admin "):
+                description += "\n\nAdministrator access is checked against your selected server on each use. If you administer several, use `$admin server <server ID>`."
+            await ctx.reply(description)
             return
         lines = [f"`{prefix}ask <question>` - local conversation here in DM (current server members)",
                  f"`{prefix}help <command>` - command details"]
@@ -9765,6 +9823,12 @@ async def mediabot_help(
             lines += [f"`{prefix}think [--auto] <text>` - save your private raw capture; --auto attempts one source-quoted task",
                       f"`{prefix}life inbox` - your captures and confirmed task/event creation",
                       f"`{prefix}life tasks` - your Nextcloud tasks and completion"]
+        if is_administrator:
+            lines += [f"`{prefix}admin reports` - report queue for your authorized server",
+                      f"`{prefix}admin server [server ID]` - list or select the admin server for this DM"]
+            if is_bot_owner:
+                lines += [f"`{prefix}admin users` / `{prefix}admin link @user SeerrUser` - request-account linking",
+                          f"`{prefix}admin integrations` / `{prefix}admin logs` / `{prefix}admin errors` - private diagnostics"]
         embed = discord.Embed(title="MediaBot in DMs", description="\n".join(lines), color=discord.Color.blurple())
         embed.add_field(name="In the server", value="`$ask` answers in the channel. `$ask --private <question>` moves the answer to a DM. `$recommend --auto` optionally ranks provider suggestions with the local model. Media commands and torrent review currently require the configured server; an account link does not enable them in DMs.", inline=False)
         await ctx.reply(embed=embed)
@@ -12474,6 +12538,119 @@ async def newly_added(
 # ADMIN
 # ============================================================
 
+async def fetch_admin_scope(guild_id, user):
+    """Fetch both guild roles and membership before granting an admin scope."""
+    if guild_id not in ALLOWED_GUILD_IDS or getattr(user, "bot", False):
+        return None
+    if bot.get_guild(guild_id) is None:
+        raise commands.CheckFailure("That configured server is unavailable to MediaBot.")
+    try:
+        guild = await bot.fetch_guild(guild_id)
+    except (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError):
+        raise commands.CheckFailure("I could not verify the configured server and its current roles. Try again shortly.") from None
+    try:
+        member = await guild.fetch_member(user.id)
+    except discord.NotFound:
+        return None
+    except (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError):
+        raise commands.CheckFailure("I could not verify current server membership and administrator permissions. Try again shortly.") from None
+    if (guild.id != guild_id or member.guild.id != guild_id or member.id != user.id or member.bot
+            or not getattr(member.guild_permissions, "administrator", False)):
+        return None
+    return guild, member
+
+
+async def available_admin_scopes(user):
+    scopes = []
+    for guild_id in sorted(ALLOWED_GUILD_IDS):
+        scope = await fetch_admin_scope(guild_id, user)
+        if scope is not None:
+            scopes.append(scope)
+    return scopes
+
+
+async def resolve_admin_context(ctx, *, guild_id=None):
+    """Resolve one authorized server without changing the DM's actual context."""
+    if ctx.guild is not None:
+        selected_id = ctx.guild.id
+        if guild_id is not None and guild_id != selected_id:
+            raise commands.CheckFailure("Run this command in the intended server, or select it from your DM.")
+    else:
+        selected_id = guild_id if guild_id is not None else ADMIN_DM_GUILDS.get(ctx.author.id)
+    if selected_id is not None:
+        scope = await fetch_admin_scope(selected_id, ctx.author)
+        if scope is None:
+            raise commands.CheckFailure("Current membership and Administrator permission in an allowed server are required. Use `$admin server <server ID>` to select another authorized server.")
+    else:
+        scopes = await available_admin_scopes(ctx.author)
+        if len(scopes) != 1:
+            if not scopes:
+                raise commands.CheckFailure("Current membership and Administrator permission in an allowed server are required.")
+            raise commands.CheckFailure("You administer multiple allowed servers. Run `$admin server` to list them, then `$admin server <server ID>` to choose this DM's context.")
+        scope = scopes[0]
+    ctx._admin_guild, ctx._admin_member = scope
+    return scope
+
+
+def admin_guild(ctx):
+    guild = getattr(ctx, "_admin_guild", None) or ctx.guild
+    if guild is None or guild.id not in ALLOWED_GUILD_IDS:
+        raise commands.CheckFailure("Resolve an authorized server with `$admin server <server ID>` first.")
+    return guild
+
+
+def require_admin_context():
+    async def predicate(ctx):
+        await resolve_admin_context(ctx)
+        return True
+    return commands.check(predicate)
+
+
+class AdminMemberResolutionError(commands.BadArgument):
+    """Safe, actionable error for scoped Discord member selection."""
+
+
+async def resolve_admin_member(ctx, value):
+    """Resolve an exact current member only inside the authorized admin scope."""
+    guild = admin_guild(ctx)
+    token = str(value or "").strip()
+    wrapped_identity = re.fullmatch(r"\*\*(<@!?[0-9]+>|[0-9]+)\*\*", token)
+    if wrapped_identity:
+        token = wrapped_identity.group(1)
+    identity = re.fullmatch(r"(?:<@!?([0-9]+)>|([0-9]+))", token)
+    try:
+        if identity:
+            member = await guild.fetch_member(int(identity.group(1) or identity.group(2)))
+        else:
+            wanted = token.lstrip("@").casefold()
+            if not wanted:
+                raise AdminMemberResolutionError("Use a Discord mention, user ID, or exact member name.")
+            # A complete current member listing avoids picking one result from
+            # a truncated prefix search or trusting a stale cached nickname.
+            matches = []
+            scanned = 0
+            async for candidate in guild.fetch_members(limit=None):
+                scanned += 1
+                if scanned > 10000:
+                    raise AdminMemberResolutionError("This server is too large for an exact-name lookup. Use the Discord user ID or mention.")
+                names = {str(getattr(candidate, name, "") or "").casefold()
+                         for name in ("name", "display_name", "global_name")}
+                if wanted in names:
+                    matches.append(candidate.id)
+                    if len(matches) > 1:
+                        raise AdminMemberResolutionError("More than one Discord member has that exact name. Use the Discord user ID or mention.")
+            if not matches:
+                raise AdminMemberResolutionError("No current member in the selected server has that exact name. Use the Discord user ID or mention.")
+            member = await guild.fetch_member(matches[0])
+        if member.guild.id != guild.id or (identity and member.id != int(identity.group(1) or identity.group(2))):
+            raise AdminMemberResolutionError("The Discord user is not a current member of the selected server.")
+        return member
+    except discord.NotFound:
+        raise AdminMemberResolutionError("The Discord user is not a current member of the selected server.") from None
+    except (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError):
+        raise commands.CheckFailure("I could not verify the target Discord member. Try again shortly.") from None
+
+
 @bot.group(
     name="admin",
     invoke_without_command=True,
@@ -12482,32 +12659,55 @@ async def newly_added(
         "user linking, logs, and diagnostics."
     )
 )
-@commands.has_guild_permissions(
-    administrator=True
-)
+@require_admin_context()
 async def admin(ctx):
+    scope = admin_guild(ctx)
+    owner_commands = ""
+    if await bot.is_owner(ctx.author):
+        owner_commands = (
+            "`$admin integrations` (or `health`) - service and tracking health\n"
+            "`$admin users` - list request accounts\n"
+            "`$admin link @user SeerrUsername` - link accounts\n"
+            "`$admin logs [lines]` - recent bot logs\n"
+            "`$admin errors [lines]` - warnings/errors\n"
+        )
     await ctx.reply(
         (
             "**MediaBot admin commands**\n"
-            "`$admin integrations` (or `health`) - service and tracking health\n"
-            "`$admin users` - list Seerr users\n"
-            "`$admin link @user SeerrUsername` - link accounts\n"
+            f"Server: **{discord.utils.escape_markdown(scope.name)}** (`{scope.id}`)\n"
+            + owner_commands +
             "`$admin reports` - playback/problem report queue\n"
-            "`$admin logs [lines]` - recent bot logs\n"
-            "`$admin errors [lines]` - warnings/errors\n"
+            "`$admin server [server ID]` - list or select your DM's server\n"
             "\n"
-            "Use `$help admin` for generated command help."
+            "These commands also work in DM. Account linking and diagnostics require the bot owner. Use `$help admin` for details."
         )
     )
+
+
+@admin.command(name="server", help="List authorized servers or select one for admin commands in this DM. Usage: $admin server [server ID]")
+async def admin_server(ctx, guild_id: int = None):
+    if guild_id is not None:
+        scope, _ = await resolve_admin_context(ctx, guild_id=guild_id)
+        if len(ADMIN_DM_GUILDS) >= 512 and ctx.author.id not in ADMIN_DM_GUILDS:
+            ADMIN_DM_GUILDS.pop(next(iter(ADMIN_DM_GUILDS)))
+        ADMIN_DM_GUILDS[ctx.author.id] = scope.id
+        await ctx.reply(f"Admin DM context: **{discord.utils.escape_markdown(scope.name)}** (`{scope.id}`). Membership and permissions are checked again for every command. This choice lasts until the bot restarts or you choose another server.")
+        return
+    if ctx.guild is not None:
+        scopes = [await resolve_admin_context(ctx)]
+    else:
+        scopes = await available_admin_scopes(ctx.author)
+    if not scopes:
+        raise commands.CheckFailure("Current membership and Administrator permission in an allowed server are required.")
+    choices = [f"`{guild.id}` - {discord.utils.escape_markdown(guild.name)}" for guild, _ in scopes]
+    await ctx.reply("**Your authorized admin servers**\n" + "\n".join(choices) + "\nUse `$admin server <server ID>` to select this DM's context.")
 
 
 @admin.command(
     name="users"
 )
 @commands.is_owner()
-@commands.has_guild_permissions(
-    administrator=True
-)
+@require_admin_context()
 async def admin_users(ctx):
     try:
         users = await seerr.users()
@@ -12525,39 +12725,37 @@ async def admin_users(ctx):
 
         return
 
-    lines = []
-
-    for user in users:
-        username = (
-            user.get("username")
-            or user.get("plexUsername")
-            or user.get("email")
-            or "UNKNOWN"
+    lines = [f"`{user['id']}` - {discord.utils.escape_markdown(discord.utils.escape_mentions(user_display_name(user)))[:350]}"
+             for user in users]
+    pages, page = [], []
+    for line in lines:
+        if sum(len(item) + 1 for item in page) + len(line) > 1500:
+            pages.append("\n".join(page))
+            page = []
+        page.append(line)
+    if page:
+        pages.append("\n".join(page))
+    for index, text in enumerate(pages, 1):
+        delivered = await send_private_output(
+            ctx,
+            content=(f"**Seerr Users ({len(users)} total, page {index}/{len(pages)})**\n{text}\n\n"
+                     "Match by Jellyfin/Plex username, Seerr display name, email or numeric Seerr ID. "
+                     "Missing a Jellyfin account? Import it in Seerr > Users > Import Jellyfin Users, "
+                     "or have that member sign into Seerr first. "
+                     "You can continue with `$admin link` here in DM."),
+            public_success="",
         )
-
-        lines.append(
-            f"`{user.get('id')}` - {username}"
-        )
-
-    text = "\n".join(lines)
-
-    if len(text) > 1800:
-        text = text[:1800] + "\n..."
-
-    await send_private_output(
-        ctx,
-        content=f"**Seerr Users**\n{text}",
-        public_success="I sent the Seerr user list to you privately.",
-    )
+        if not delivered:
+            return
+    if ctx.guild is not None:
+        await ctx.reply("I sent the complete Seerr user list privately. You can continue with `$admin link` in that DM.", delete_after=15)
 
 
 @admin.command(
     name="link"
 )
 @commands.is_owner()
-@commands.has_guild_permissions(
-    administrator=True
-)
+@require_admin_context()
 async def admin_link(
     ctx,
     discord_user: str,
@@ -12580,99 +12778,7 @@ async def admin_link(
       - numeric Seerr user ID
     """
 
-    # --------------------------------------------------------
-    # Resolve Discord member
-    # --------------------------------------------------------
-
-    member = None
-
-    # Best case: Discord actually parsed a mention somewhere
-    # in the message. This also survives things like bolding.
-    if ctx.message.mentions:
-        member = ctx.message.mentions[0]
-
-    # Otherwise clean up whatever token was supplied.
-    token = discord_user.strip()
-
-    if member is None:
-        cleaned = (
-            token
-            .replace("<@", "")
-            .replace("!>", "")
-            .replace(">", "")
-            .replace("*", "")
-            .strip()
-        )
-
-        # User ID / raw mention ID
-        if cleaned.isdigit():
-            user_id = int(cleaned)
-
-            member = ctx.guild.get_member(user_id)
-
-            if member is None:
-                try:
-                    member = await ctx.guild.fetch_member(user_id)
-                except discord.NotFound:
-                    pass
-                except discord.HTTPException:
-                    pass
-
-    # Name/display-name fallback
-    if member is None:
-        wanted_discord = (
-            token
-            .replace("*", "")
-            .lstrip("@")
-            .strip()
-            .casefold()
-        )
-
-        matches = []
-
-        for candidate in ctx.guild.members:
-            candidate_names = {
-                candidate.name.casefold(),
-                candidate.display_name.casefold(),
-            }
-
-            global_name = getattr(
-                candidate,
-                "global_name",
-                None
-            )
-
-            if global_name:
-                candidate_names.add(
-                    global_name.casefold()
-                )
-
-            if wanted_discord in candidate_names:
-                matches.append(candidate)
-
-        if len(matches) == 1:
-            member = matches[0]
-
-        elif len(matches) > 1:
-            await ctx.reply(
-                (
-                    "More than one Discord member matched "
-                    f'**"{token}"**.\n'
-                    "Use an actual @mention or Discord user ID."
-                )
-            )
-            return
-
-    if member is None:
-        await ctx.reply(
-            (
-                "Couldn't identify that Discord user.\n\n"
-                "Use one of:\n"
-                "`$admin link @user SeerrUser`\n"
-                "`$admin link DiscordUserID SeerrUser`"
-            )
-        )
-        return
+    member = await resolve_admin_member(ctx, discord_user)
 
     # --------------------------------------------------------
     # Get Seerr users
@@ -12686,45 +12792,17 @@ async def admin_link(
         await ctx.reply(f"Couldn't read Seerr users. Error ID: `{error_id}`")
         return
 
-    wanted = seerr_username.strip().casefold()
-
-    matches = []
-
-    for user in users:
-
-        # Allow exact Seerr numeric ID too.
-        if wanted == str(user.get("id", "")).casefold():
-            matches.append(user)
-            continue
-
-        possible_names = [
-            user.get("username"),
-            user.get("email"),
-            user.get("plexUsername"),
-        ]
-
-        normalized = {
-            str(value).strip().casefold()
-            for value in possible_names
-            if value
-        }
-
-        if wanted in normalized:
-            matches.append(user)
+    matches = matching_users(users, seerr_username)
 
     if len(matches) == 0:
-        await ctx.reply(
-            (
-                f'No exact Seerr user match for '
-                f'**"{seerr_username}"**.\n\n'
-                "I checked:\n"
-                "- username\n"
-                "- email\n"
-                "- Plex username\n"
-                "- Seerr user ID\n\n"
-                "Run `$admin users` to see available accounts."
-            )
-        )
+        await send_private_output(ctx, content=(
+            "No exact Seerr account matched that value. I checked every page and the "
+            "Jellyfin username, Plex username, Seerr display name, email and numeric ID.\n\n"
+            "A Jellyfin account must also exist in Seerr before it can be linked. "
+            "Use Seerr > Users > Import Jellyfin Users to import the intended account, "
+            "or have the member sign into Seerr with Jellyfin.\n\n"
+            "Then run `$admin users` and `$admin link` here in DM. No link was changed."
+        ))
         return
 
     if len(matches) > 1:
@@ -12740,12 +12818,7 @@ async def admin_link(
 
     user = matches[0]
 
-    canonical_name = (
-        user.get("username")
-        or user.get("email")
-        or user.get("plexUsername")
-        or str(user["id"])
-    )
+    canonical_name = user_display_name(user)
 
     set_link(
         member.id,
@@ -12775,10 +12848,10 @@ async def admin_link(
         "Usage: $admin reports [page]"
     ),
 )
-@commands.has_guild_permissions(administrator=True)
+@require_admin_context()
 async def admin_reports(ctx, page: int = 1):
     records = list_media_reports(
-        discord_guild_id=ctx.guild.id,
+        discord_guild_id=admin_guild(ctx).id,
         statuses=("open", "in_progress"),
         limit=500,
     )
@@ -12789,10 +12862,11 @@ async def admin_reports(ctx, page: int = 1):
     initial_index = max(0, min(int(page) - 1, len(records) - 1))
     view = AdminReportQueueView(
         requester_id=ctx.author.id,
-        guild_id=ctx.guild.id,
+        guild_id=admin_guild(ctx).id,
         records=records,
         command_message=ctx.message,
         initial_index=initial_index,
+        dm_channel_id=ctx.channel.id if ctx.guild is None else None,
     )
     message = await ctx.reply(embed=view.build_embed(), view=view)
     view.message = message
@@ -12806,7 +12880,7 @@ async def admin_reports(ctx, page: int = 1):
 async def run_admin_report_transition(ctx, report_id, status, note=""):
     existing = media_report_by_id(
         int(report_id),
-        discord_guild_id=ctx.guild.id,
+        discord_guild_id=admin_guild(ctx).id,
     )
     if existing is None:
         await ctx.reply(f"No report **#{int(report_id)}** exists in this server.")
@@ -12820,7 +12894,7 @@ async def run_admin_report_transition(ctx, report_id, status, note=""):
 
     record = await transition_media_report(
         report_id=int(report_id),
-        guild_id=ctx.guild.id,
+        guild_id=admin_guild(ctx).id,
         handler_id=ctx.author.id,
         status=status,
         note=note,
@@ -12841,7 +12915,7 @@ async def run_admin_report_transition(ctx, report_id, status, note=""):
     name="claim",
     help="Mark one report as actively being investigated.",
 )
-@commands.has_guild_permissions(administrator=True)
+@require_admin_context()
 async def admin_reports_claim(ctx, report_id: int):
     await run_admin_report_transition(ctx, report_id, "in_progress")
 
@@ -12850,7 +12924,7 @@ async def admin_reports_claim(ctx, report_id: int):
     name="resolve",
     help="Resolve one report and optionally save an administrator note.",
 )
-@commands.has_guild_permissions(administrator=True)
+@require_admin_context()
 async def admin_reports_resolve(ctx, report_id: int, *, note: str = ""):
     await run_admin_report_transition(ctx, report_id, "resolved", note)
 
@@ -12859,7 +12933,7 @@ async def admin_reports_resolve(ctx, report_id: int, *, note: str = ""):
     name="dismiss",
     help="Dismiss one report and optionally save an administrator note.",
 )
-@commands.has_guild_permissions(administrator=True)
+@require_admin_context()
 async def admin_reports_dismiss(ctx, report_id: int, *, note: str = ""):
     await run_admin_report_transition(ctx, report_id, "dismissed", note)
 
@@ -12875,9 +12949,7 @@ async def admin_reports_dismiss(ctx, report_id: int, *, note: str = ""):
     )
 )
 @commands.is_owner()
-@commands.has_guild_permissions(
-    administrator=True
-)
+@require_admin_context()
 async def admin_integrations(
     ctx
 ):
@@ -13007,8 +13079,8 @@ async def admin_integrations(
     else:
         lines.append("VPN torrent intake: **NOT CONFIGURED**")
 
-    stats = tracking_stats(discord_guild_id=ctx.guild.id)
-    intent_stats = media_request_intent_stats(discord_guild_id=ctx.guild.id)
+    stats = tracking_stats(discord_guild_id=admin_guild(ctx).id)
+    intent_stats = media_request_intent_stats(discord_guild_id=admin_guild(ctx).id)
 
     lines.append(
         (
@@ -13037,7 +13109,7 @@ async def admin_integrations(
         f"**{intent_stats['accepted']} awaiting recovery**"
     )
 
-    report_counts = media_report_stats(ctx.guild.id)
+    report_counts = media_report_stats(admin_guild(ctx).id)
     lines.append(
         "Open/claimed media reports: "
         f"**{report_counts['active']}**"
@@ -13045,7 +13117,7 @@ async def admin_integrations(
 
     try:
         event_records = events.list_events(
-            discord_guild_id=ctx.guild.id,
+            discord_guild_id=admin_guild(ctx).id,
             limit=500,
         )
         open_events = sum(
@@ -13168,9 +13240,7 @@ async def send_log_output(
     )
 )
 @commands.is_owner()
-@commands.has_guild_permissions(
-    administrator=True
-)
+@require_admin_context()
 async def admin_logs(
     ctx,
     lines: int = 80
@@ -13217,9 +13287,7 @@ async def admin_logs(
     )
 )
 @commands.is_owner()
-@commands.has_guild_permissions(
-    administrator=True
-)
+@require_admin_context()
 async def admin_errors(
     ctx,
     lines: int = 120
@@ -13373,6 +13441,9 @@ async def on_command_error(
         error,
         commands.BadArgument
     ):
+        if isinstance(original, AdminMemberResolutionError):
+            await ctx.reply(str(original))
+            return
         await ctx.reply(
             (
                 "I couldn't understand one of "

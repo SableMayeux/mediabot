@@ -4,7 +4,7 @@
 MediaBot connects your server to your existing media stack, with search cards,
 confirmation buttons, account-linked requests and progress receipts.
 
-Current source version: **2.7.0**. Get stable source releases and change notes from
+Current source version: **2.7.1**. Get stable source releases and change notes from
 [Releases](https://github.com/SableMayeux/mediabot/releases).
 
 ```text
@@ -41,6 +41,10 @@ supplies the bot's Python 3.13 runtime.
 Once it is healthy, follow [Your first request](docs/USAGE.md#your-first-request)
 to link a Discord member to Seerr and submit a confirmed request. Give members
 [the user guide](docs/USAGE.md), not the installation checklist.
+
+Administrators can use `$admin` in the server or directly in the bot's DMs.
+Account linking still requires the bot owner, and the media account must exist
+in Seerr first. See [private administration](docs/USAGE.md#private-administration).
 
 ## Choose the features you need
 

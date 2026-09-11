@@ -14,6 +14,24 @@ class SeerrError(RuntimeError):
     """Raised when Seerr cannot complete an API operation."""
 
 
+def user_display_name(user: dict[str, Any]) -> str:
+    """Follow Seerr's display-name precedence, including Jellyfin identities."""
+    return next((str(user[key]).strip() for key in (
+        "username", "plexUsername", "jellyfinUsername", "email", "id"
+    ) if user.get(key) is not None and str(user[key]).strip()), "UNKNOWN")
+
+
+def matching_users(users: list[dict[str, Any]], value: str) -> list[dict[str, Any]]:
+    wanted = value.strip().casefold()
+    if not wanted:
+        return []
+    return [user for user in users if wanted in {
+        str(user[key]).strip().casefold() for key in (
+            "id", "username", "email", "plexUsername", "jellyfinUsername"
+        ) if user.get(key) is not None
+    }]
+
+
 class SeerrProvider(Provider):
     """Own Seerr HTTP transport and API-specific behavior."""
 
@@ -133,15 +151,38 @@ class SeerrProvider(Provider):
         ]
 
     async def users(self) -> list[dict[str, Any]]:
-        result = await self.request("GET", "/user")
-
-        if isinstance(result, list):
-            return result
-
-        if isinstance(result, dict):
-            return result.get("results", [])
-
-        return []
+        """Fetch the complete directory; never silently return only page one."""
+        users, seen = [], set()
+        skip, page_size = 0, 100
+        for _ in range(100):
+            result = await self.request("GET", "/user", params={"take": page_size, "skip": skip})
+            legacy_list = isinstance(result, list)
+            page = result if legacy_list else result.get("results") if isinstance(result, dict) else None
+            if not isinstance(page, list):
+                raise SeerrError("Seerr returned an invalid user directory.")
+            for user in page:
+                if not isinstance(user, dict) or type(user.get("id")) is not int or user["id"] <= 0:
+                    raise SeerrError("Seerr returned an invalid user identity.")
+                if user["id"] in seen:
+                    raise SeerrError("Seerr user pagination repeated an identity. Retry the directory lookup.")
+                seen.add(user["id"])
+                users.append(user)
+            skip += len(page)
+            if legacy_list:
+                return users
+            info = result.get("pageInfo", {})
+            total = info.get("results") if isinstance(info, dict) else None
+            if total is not None and (type(total) is not int or total < 0):
+                raise SeerrError("Seerr returned invalid user pagination metadata.")
+            if total is not None and skip >= total:
+                return users
+            if not page:
+                if total is not None and skip < total:
+                    raise SeerrError("Seerr returned an incomplete user directory. Retry the directory lookup.")
+                return users
+            if total is None and len(page) < page_size:
+                return users
+        raise SeerrError("Seerr user directory exceeded the pagination limit.")
 
     async def tv_details(self, media_id: int) -> Any:
         return await self.request("GET", f"/tv/{media_id}")

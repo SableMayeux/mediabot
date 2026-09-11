@@ -7,6 +7,35 @@ and this project uses semantic version numbers.
 
 ## [Unreleased]
 
+## [2.7.1] - 2026-09-11
+
+### Added
+
+- Run administrator commands directly in the bot's DMs using current
+  administrator membership in an allowed Discord server. When several servers
+  are eligible, `$admin server <server ID>` chooses the target context.
+  Owner-only account and diagnostic commands retain their owner requirement.
+
+### Fixed
+
+- Recognize Seerr's `jellyfinUsername` when displaying and linking imported
+  Jellyfin accounts, alongside existing usernames and numeric Seerr IDs.
+- Follow Seerr user pagination and split private user-list output into complete
+  pages, so users beyond the first API page or Discord message length limit
+  remain discoverable for linking.
+- Explain that a Jellyfin account must first exist in Seerr through its import
+  flow or the member's first login. `$admin link` maps that existing account;
+  it does not silently import users or create accounts.
+- Update server/DM help and onboarding for private administration while keeping
+  ordinary media commands in the server and retaining existing permissions.
+- Keep admin server listings scoped to their originating channel's server.
+  A revoked DM server selection must be changed explicitly before continuing.
+- Bind report controls to the displayed report and reject concurrent or stale
+  actions, preventing a repeated click from affecting the next report.
+- Add a transactional homelab deployer that selects the preserved homelab
+  Compose file explicitly, validates existing storage and gateway boundaries,
+  and retains the portable source tree for release validation and rollback.
+
 ## [2.7.0] - 2026-09-11
 
 ### Added

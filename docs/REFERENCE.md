@@ -35,6 +35,10 @@ The default prefix is `$`.
 | `$event clear` | Administrator: complete expired schedules and archive terminal events. |
 | `$new [count]` | Show recently added Jellyfin media. |
 | `$help [command]` | Show the current user-facing command model and generated details. |
+| `$admin` | Open administrator tools in the server or DM, subject to the same current server permissions. |
+| `$admin server [server ID]` | List currently eligible servers, or select the server used by DM administration. |
+| `$admin users` | Bot owner and administrator: privately list Seerr accounts and their numeric IDs. |
+| `$admin link <Discord member or ID> <Seerr user or ID>` | Bot owner and administrator: map an existing Seerr account to a Discord member. |
 
 Private Life utilities require the bot owner:
 `$think <text>` (alias `$capture`) is owner-only and writes a private raw note.
@@ -54,6 +58,24 @@ the requester, in the original destination. Each conversation has separate
 temporary history. Public follow-up questions and answers are visible in the
 channel; use a new private conversation for private follow-ups. `$help` works
 in DMs; other household media commands still use the configured server.
+
+`$admin` and its subcommands also work in DMs. The caller must currently be an
+administrator of an allowlisted server; the bot owner's status alone does not
+satisfy that check. Sensitive subcommands retain their additional bot-owner
+requirement. With several eligible servers, `$admin server <server ID>` chooses
+the context used for member lookup and guild-local reports; `$admin server`
+alone lists eligible servers. The selection lasts until restart or replacement.
+Losing access denies subsequent commands without silently switching servers;
+select another authorized server explicitly. Membership and permissions are
+rechecked, and ordinary media commands remain server-only.
+
+`$admin users` follows Seerr's paginated account API and privately delivers the
+list across multiple messages rather than cutting off the end. Account names
+include Seerr's Jellyfin username when applicable. Linking accepts the account's
+numeric Seerr ID, Seerr username, Jellyfin/Plex username or email address.
+The account must already exist in Seerr after import or first login. Linking
+does not import Jellyfin accounts or create users. See the
+[first-request walkthrough](USAGE.md#your-first-request).
 
 `$torrent <movie|tv|music|game|app|other> <magnet>` accepts one BTIH magnet from the owner or a
 Discord account explicitly linked to a Seerr media identity. Torrent intake is

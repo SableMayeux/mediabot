@@ -26,6 +26,13 @@ allowlisted, protect `.env` as a secret, grant the bot only necessary Discord
 permissions, and keep Seerr, Jellyfin, Sonarr, and SoulSync management APIs on a
 trusted network or behind an authenticated reverse proxy.
 
+Administrator commands in DMs require current administrator membership in an
+allowlisted server. The caller must select a server when several are eligible;
+the selection is a context, not a permission grant. Owner-only account linking
+and diagnostics retain both ownership and server administrator requirements.
+Linking maps an existing Seerr identity and does not import accounts or expand
+that user's Seerr permissions.
+
 The torrent command is limited to the bot owner and Discord accounts explicitly
 linked to a Seerr media identity. It must never connect to qBittorrent directly.
 Keep its token-scoped intake gateway on an internal Docker network, reserve a

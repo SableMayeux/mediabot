@@ -14,15 +14,23 @@ Examples below use the default `$` prefix.
 The installer gets the bot online. This one-time account setup makes requests
 belong to the right person:
 
-1. The member signs into the server's **Seerr** website. The server operator
-   controls which Jellyfin, Emby, Plex or local accounts can sign in and what
-   they can request. See [Seerr's user settings](https://docs.seerr.dev/using-seerr/settings/users/).
+1. Make sure the member exists in **Seerr**, not just Jellyfin. Have the member
+   sign into the Seerr website with their media-server account, if new media
+   sign-ins are enabled. Alternatively, the Seerr administrator opens its
+   **Users** page and uses **Import Jellyfin Users** to import the intended
+   account. Review the import selection and resulting permissions in your
+   Seerr version. See [Seerr's account import and first-login instructions](https://docs.seerr.dev/using-seerr/users/adding-users/).
 2. The Discord application's **bot owner**, who must also be a **server
-   administrator**, runs `$admin users` in the allowed server. The bot sends
-   that owner a private list of Seerr users and numeric IDs.
+   administrator**, runs `$admin users` in the allowed server or the bot's DM.
+   The bot sends a private list of Seerr users and numeric IDs, split into pages
+   when necessary. If the owner administers more than one allowed server, first
+   select the DM context with `$admin server <server ID>`.
 3. That same owner runs `$admin link @member 12`, replacing `@member` with the
    actual Discord mention and `12` with the intended Seerr user ID. Verify the
-   match before linking. Numeric IDs avoid ambiguous display names.
+   match before linking. The Discord member's numeric ID also works, which is
+   useful in DMs. Use the numeric **Seerr** ID from `$admin users`, not the
+   Jellyfin user ID. A matching Seerr/Jellyfin username is also accepted, but
+   numeric IDs avoid ambiguous names.
 4. The member runs `$whoami` in the server. The bot privately confirms the
    linked Seerr identity.
 5. The member sends `$request Interstellar 2014`, selects the exact result,
@@ -33,7 +41,11 @@ belong to the right person:
 The bot owner is the Discord application's owner, not automatically everyone
 with the server's Administrator role. A Jellyfin account, Seerr account and
 Discord account are separate identities until the operator explicitly maps
-them. Linking does not install Seerr or create a media-server account.
+them. `$admin link` creates that Discord-to-Seerr mapping. It does not import
+Jellyfin users, create new accounts or change Seerr request permissions. If a
+name is missing from `$admin users`, finish the Seerr import or first login,
+then run the list command again. The operator controls new sign-ins and request
+permissions in [Seerr's user settings](https://docs.seerr.dev/using-seerr/settings/users/).
 
 The expected outcome is a durable receipt showing an accepted request or a
 clear existing/available state. **Accepted is not downloaded.** Seerr approval,
@@ -100,13 +112,45 @@ reopen an event without recreating its nominations and votes.
 | `$ask` | Current allowed-server members and bot owner, if AI is configured | Same membership check, if AI is configured |
 | `$think`, `$capture`, `$life` | Bot owner, private workflow | Bot owner |
 | `$torrent` intake and review | Linked members for intake; owner/admin for review, if its gateway is configured | Not currently supported |
-| `$admin` tools | Administrators; sensitive linking/diagnostics also require bot ownership | Not currently supported |
+| `$admin` tools | Administrators; sensitive linking/diagnostics also require bot ownership | Same current-server permission requirements; select a server if needed |
 
 The different help lists reflect current permissions. A media account link does
 not enable media commands in DMs. Buttons usually belong to the person who
 opened the card, so start your own command instead of using someone else's
 controls. Abandoned interactive cards expire after about five minutes; run the
 command again. Successful receipts and event dashboards remain.
+
+## Private administration
+
+DM the bot with `$help admin` or `$admin` to see the administration commands
+available to you. A current administrator of an allowlisted server can use
+the report queue from there. User listing, account linking, integration health,
+logs and errors also require ownership of the Discord bot application.
+
+If you administer one eligible server, MediaBot uses it automatically.
+`$admin server` lists the servers where you currently have access. If you
+administer several, select the target before running an admin command:
+
+```text
+$admin server 123456789012345678
+$admin users
+$admin link 234567890123456789 12
+$admin integrations
+```
+
+The first ID is the Discord server, the second is a Discord member and `12`
+is the member's Seerr ID. Replace all three with real IDs. Server membership
+and administrator permission are checked again when commands run; choosing a
+server does not grant new access. Selection lasts until the bot restarts or
+you select another server. If you lose access to the selected server, commands
+are denied until you explicitly choose another authorized server. MediaBot does
+not silently switch targets. The selected server determines the member
+lookup and report queue. The installation still shares one Seerr provider and
+account-link store across its trusted servers.
+
+Commands continue to work in the server as before. DM administration does not
+enable `$request`, `$status`, `$whoami`, media discovery, events or torrent
+commands in DMs. Use the server channel for those commands.
 
 ## Optional local AI and Life
 

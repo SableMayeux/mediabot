@@ -124,6 +124,11 @@ online in your allowlisted server. Now send `$help` in its text channel. Finish
 [the account-linking and first-request walkthrough](USAGE.md#your-first-request)
 before inviting everyone to use it.
 
+The owner can complete `$admin users` and `$admin link` in the bot's DM. The
+member must already appear in Seerr after import or first login; a Jellyfin
+account alone is not yet a request identity. DM administration verifies the
+owner's current administrator role in the selected allowed server.
+
 The named volume holds SQLite state, logs and default private captures. The
 container uses UID/GID 1000 with a read-only root filesystem. The small
 `data-init` service prepares the new volume; you do not need to chown a host
@@ -211,7 +216,9 @@ docker compose logs --tail 100 mediabot
 | Provider cannot be reached | Test the internal URL from the container with `--check`. Container `localhost` is not the host. Check provider listener, firewall and Docker networking. |
 | Provider returns unauthorized/forbidden | Correct API key for that service and correct base URL. A successful webpage response does not prove API authentication. |
 | Media result links open the wrong site | Correct the corresponding `*_PUBLIC_URL`, then recreate the service with `--start`. |
-| Request says the user is not linked | Follow the owner-admin `$admin link` step in the user guide. A Jellyfin login alone does not create the Discord mapping. |
+| Request says the user is not linked | Follow the owner-admin `$admin link` step in the user guide. Import the intended Jellyfin account into Seerr or have the member sign into Seerr first, then link its numeric Seerr ID. |
+| A Jellyfin user is missing from `$admin users` | Check the Seerr **Users** page. Jellyfin users are not automatically enrolled by MediaBot. Complete Seerr import/first login, verify permissions, and refresh `$admin users`. |
+| An admin command is denied in DM or asks for a server | You must currently administer an allowed server. With several eligible servers, use `$admin server <server ID>`. User listing/linking and sensitive diagnostics also require bot ownership. |
 | Private command cannot delete its source | Grant Manage Messages in that channel, and permit DMs from the bot. The private workflow stops if source deletion fails. |
 | `$ask`, `$life` or `$torrent` says unavailable | These need separately commissioned gateways. See the feature matrix in the README; enabling an environment variable does not install a service. |
 | Torrent says completed or `stalledUP`, but the files seem missing | Check full torrent size, selected bytes and actual content/save paths. A torrent with all files skipped can show zero selected bytes without downloading its payload. `stalledUP` means waiting to upload; it alone does not prove all intended files exist. See the [torrent walkthrough](USAGE.md#optional-torrent-workflow). |
