@@ -45,6 +45,30 @@ class LocalAIUITests(unittest.IsolatedAsyncioTestCase):
   view.service.cancel.assert_awaited_once_with(identity)
   self.assertIsNone(view.message.edit.await_args.kwargs['view'])
   self.assertFalse(any(call.kwargs.get('embed') for call in view.message.edit.await_args_list))
+ async def test_public_generation_is_bound_to_actor_guild_and_channel(self):
+  view=self.view(owner=False,guild=10);view.private=False;view.channel_id=20;view.authorize=AsyncMock(return_value=True)
+  view.message=SimpleNamespace(guild=SimpleNamespace(id=10),channel=SimpleNamespace(id=20),edit=AsyncMock())
+  await view.generate('Public question')
+  view.service.chat.assert_awaited_once()
+  embed=next(call.kwargs['embed'] for call in view.message.edit.await_args_list if call.kwargs.get('embed'))
+  self.assertEqual(embed.fields[0].value,'Public question')
+  for actor,guild,channel in ((99,10,20),(42,11,20),(42,10,21)):
+   event=interaction(actor,guild);event.channel_id=channel
+   self.assertFalse(await view.interaction_check(event))
+  event=interaction(42,10);event.channel_id=20
+  self.assertTrue(await view.interaction_check(event))
+  view.authorize.return_value=False
+  self.assertFalse(await view.interaction_check(event))
+ async def test_public_route_refuses_a_different_channel_before_inference(self):
+  view=self.view(guild=10);view.private=False;view.channel_id=20
+  view.message=SimpleNamespace(guild=SimpleNamespace(id=10),channel=SimpleNamespace(id=21),edit=AsyncMock())
+  await view.generate('Must not route here')
+  view.service.chat.assert_not_awaited()
+ async def test_separate_requesters_have_separate_history(self):
+  first=self.view();second=self.view();second.actor_id=99
+  await first.generate('First user text');await second.generate('Second user text')
+  self.assertNotIn('First user text',str(second.service.chat.call_args))
+  self.assertNotIn('Second user text',str(first.history))
  async def test_overlapping_generations_submit_once(self):
   view=self.view();started=asyncio.Event();release=asyncio.Event()
   async def answer(*args):started.set();await release.wait();return {'text':'First response'}

@@ -5,7 +5,7 @@ stack. It gives household users one small, consistent command surface while
 leaving media search, approval, acquisition, and playback with the services
 that already own those jobs.
 
-Current source version: **2.3.0**
+Current source version: **2.4.0**
 
 The 1.x household-media command model remains a compatibility contract. The
 2.x line adds private and guarded workflows around that stable core without
@@ -35,9 +35,11 @@ turning household commands into an administration console. See
 - Opens private `$life` capture/task views. Creating a Nextcloud task or event,
   or completing a task, requires an explicit confirmation. Optional task
   reminders are one-shot Nextcloud notifications, separate from due dates.
-- Runs owner-only `$ask <question>` conversations through the local model in
-  private DMs. Follow-ups stay in memory for ten minutes; the model cannot search
-  notes, browse the web, or change tasks. Discord retains the private messages.
+- Runs `$ask <question>` for current members of the configured Discord server.
+  Replies appear in the originating channel; `$ask --private <question>` uses a
+  private DM. Requester-bound follow-ups stay in memory for ten minutes. The
+  model cannot search notes, browse the web, or change tasks. Discord retains
+  the messages. `$help` works in DMs and shows the appropriate command list.
 - Gives verified Discord accounts linked to a Seerr media identity a narrow
   `$torrent <type> <magnet>` intake path for movies, TV, music, games,
   applications, and other payloads. It removes the Discord source
@@ -80,15 +82,24 @@ The default prefix is `$`.
 | `$new [count]` | Show recently added Jellyfin media. |
 | `$help [command]` | Show the current user-facing command model and generated details. |
 
-Sensitive utilities are intentionally omitted from normal help:
+Private Life utilities require the bot owner:
 `$think <text>` (alias `$capture`) is owner-only and writes a private raw note.
 `$life` opens a private capture selector; `$life tasks` opens current Nextcloud
 tasks. A selected capture offers **Make task** and **Plan event**, each followed
 by a confirmation. Enter dates as `YYYY-MM-DD HH:MM` in America/Denver, or use an
 explicit ISO UTC offset. A task due date is separate from its optional reminder.
-`$ask <question>` starts a private local conversation with follow-up, new-topic
-and cancellation controls. Replies go to DMs, including when started in a guild.
-These three commands are owner-only and also work in the owner's DMs.
+`$think` and `$life` are owner-only and also work in the owner's DMs.
+
+`$ask <question>` replies in the originating channel. `$ask --private <question>`
+first removes the guild command and delivers only by DM; failed deletion or
+blocked DMs prevent inference. Asking directly in DM replies there. Chat is
+available to current members of the configured server and the owner. New chat
+commands are limited to two per user per 30 seconds; the gateway still permits
+only one generation at a time. Controls recheck membership and belong only to
+the requester, in the original destination. Each conversation has separate
+temporary history. Public follow-up questions and answers are visible in the
+channel; use a new private conversation for private follow-ups. `$help` works
+in DMs; other household media commands still use the configured server.
 
 `$torrent <movie|tv|music|game|app|other> <magnet>` accepts one BTIH magnet from the owner or a
 Discord account explicitly linked to a Seerr media identity. Torrent intake is
@@ -278,8 +289,8 @@ The repository uses the standard library `unittest` runner:
 python -m pip check
 python -m compileall -q app.py mediabot scripts tests
 python -m unittest discover -s tests -q
-test -x scripts/deploy_v230.sh
-sh -n scripts/deploy_v230.sh
+test -x scripts/deploy_v240.sh
+sh -n scripts/deploy_v240.sh
 ```
 
 The GitHub Actions workflow runs the same dependency, compilation, deployer
@@ -287,7 +298,7 @@ syntax, and full unit-test gates on Python 3.13.
 
 ## Deployment note
 
-`scripts/deploy_v230.sh` is a guarded, transactional deployer for the current
+`scripts/deploy_v240.sh` is a guarded, transactional deployer for the current
 Compose layout. It backs up the runtime and SQLite database, verifies hashes
 and database integrity, performs security and health gates, and rolls back on
 failure. It is intentionally opinionated: audit its target paths, service

@@ -73,6 +73,7 @@ from mediabot.services.life_capture import LifeCaptureError, LifeCaptureService
 from mediabot.services.life_workflow import LifeWorkflowService
 from mediabot.ui.life_workflow import LifeLauncher
 from mediabot.services.local_ai import LocalAIService
+from mediabot.services.chat_access import allowed_chat_user
 from mediabot.ui.local_ai import LocalChatView
 from mediabot.ui.torrent_review import TorrentReviewLauncher, review_role
 from mediabot.services.torrent_intake import (
@@ -147,9 +148,9 @@ TORRENT_INTAKE_TOKEN_PATH = os.environ.get(
 
 PREFIX = "$"
 
-OWNER_DM_COMMANDS = frozenset({"think", "life", "ask"})
+OWNER_DM_COMMANDS = frozenset({"think", "life"})
 
-BOT_VERSION = "2.3.0"
+BOT_VERSION = "2.4.0"
 
 # discord.py normally wraps non-successful API responses in HTTPException, but
 # aiohttp connection failures can escape directly before Discord returns a
@@ -527,6 +528,10 @@ async def enforce_allowed_guild(ctx):
         setattr(ctx, "_torrent_source_deleted", True)
 
     if ctx.guild is None:
+        if command_name in {"help", "ask"}:
+            # Help is public documentation. Ask has a separate current-server
+            # membership check; this does not grant access to any Life command.
+            return True
         if (
             command is not None
             and command_name in OWNER_DM_COMMANDS
@@ -9727,6 +9732,25 @@ async def mediabot_help(
     permissions = getattr(ctx.author, "guild_permissions", None)
     is_administrator = bool(getattr(permissions, "administrator", False))
     is_bot_owner = await bot.is_owner(ctx.author)
+    if ctx.guild is None:
+        dm_commands = {"help", "ask"} | (OWNER_DM_COMMANDS if is_bot_owner else set())
+        command = bot.get_command(normalized_topic) if normalized_topic else None
+        if normalized_topic and normalized_topic not in {"all", "advanced"}:
+            if command is None or command.qualified_name not in dm_commands:
+                await ctx.reply("That command is available only in the configured server, or is not available to this account. Use `$help` for DM commands.")
+                return
+            await ctx.reply(f"`{command_usage(command, prefix)}`\n{command_description(command)}")
+            return
+        lines = [f"`{prefix}ask <question>` - local conversation here in DM (server members)",
+                 f"`{prefix}help <command>` - command details"]
+        if is_bot_owner:
+            lines += [f"`{prefix}think <text>` - save your private raw capture",
+                      f"`{prefix}life inbox` - your captures and confirmed task/event creation",
+                      f"`{prefix}life tasks` - your Nextcloud tasks and completion"]
+        embed = discord.Embed(title="MediaBot in DMs", description="\n".join(lines), color=discord.Color.blurple())
+        embed.add_field(name="In the server", value="`$ask` answers in the channel. `$ask --private <question>` moves the answer to a DM. Media requests and torrent review use the configured server.", inline=False)
+        await ctx.reply(embed=embed)
+        return
     can_use_torrent = is_bot_owner or is_administrator
     if not can_use_torrent and normalized_topic in {"advanced", "torrent"}:
         can_use_torrent = bool(get_link(ctx.author.id))
@@ -9870,6 +9894,9 @@ async def mediabot_help(
         return
 
     if normalized_topic != "all":
+        embed.add_field(name="Local conversation", value=f"`{prefix}ask <question>` - answer in this channel\n`{prefix}ask --private <question>` - answer privately in DM", inline=False)
+        if is_bot_owner:
+            embed.add_field(name="Your private Life workspace", value=f"`{prefix}think <text>` - capture a thought\n`{prefix}life inbox` / `{prefix}life tasks` - captures, tasks and confirmed actions", inline=False)
         embed.add_field(
             name="Movies and shows",
             value=(
@@ -10081,13 +10108,26 @@ async def think(ctx, *, thought: str = ""):
         )
 
 
-@bot.command(name="ask", hidden=True, help="Ask the private local model. No notes, web lookup, or automatic actions.")
-@commands.is_owner()
+async def local_chat_command_allowed(ctx):
+    if await allowed_chat_user(bot, ctx.author, ALLOWED_GUILD_IDS, guild_id=getattr(ctx.guild, "id", None)):
+        return True
+    raise commands.CheckFailure("Local chat is available to current members of the configured server and the bot owner.")
+
+
+@bot.command(name="ask", help="Ask the local model in this channel. Use `$ask --private <question>` for DM delivery. Available to current server members; no notes, web lookup, or actions.")
+@commands.check(local_chat_command_allowed)
+@commands.cooldown(2, 30, commands.BucketType.user)
 async def ask(ctx, *, question: str = ""):
-    if not question.strip():
-        await ctx.reply("Use `$ask <question>`. Answers stay private; this model does not search your notes or the web.")
+    question = question.strip()
+    parts = question.split(maxsplit=1)
+    private_option = bool(parts and parts[0].casefold() == "--private")
+    if private_option:
+        question = parts[1].strip() if len(parts) > 1 else ""
+    private = private_option or ctx.guild is None
+    if not question:
+        await ctx.reply("Use `$ask <question>` for an answer here, or `$ask --private <question>` for a DM. This model does not search your notes or the web.")
         return
-    if ctx.guild is not None:
+    if private and ctx.guild is not None:
         deleted = await delete_message_safely(ctx.message, label="private local model question")
         if not deleted:
             await ctx.send("I could not remove the public question, so it was not sent to the model. Message me directly instead.", delete_after=30)
@@ -10095,12 +10135,20 @@ async def ask(ctx, *, question: str = ""):
     if not local_ai.enabled:
         await ctx.send("The local model is not configured yet.", **({"delete_after": 30} if ctx.guild else {}))
         return
-    view = LocalChatView(bot=bot, service=local_ai, actor_id=ctx.author.id, guild_id=None)
+    origin_guild_id = getattr(ctx.guild, "id", None)
+    async def authorize(user):
+        return await allowed_chat_user(bot, user, ALLOWED_GUILD_IDS, guild_id=origin_guild_id)
+    view = LocalChatView(bot=bot, service=local_ai, actor_id=ctx.author.id,
+        guild_id=None if private else origin_guild_id, private=private, authorize=authorize)
     try:
-        view.message = await ctx.author.send("Opening a private local conversation...", view=view)
+        if private and ctx.guild is not None:
+            view.message = await ctx.author.send("Opening a private local conversation...", view=view)
+        else:
+            view.message = await ctx.reply("Opening a local conversation...", view=view, mention_author=False)
+        view.channel_id = view.message.channel.id
     except discord.HTTPException:
         view.stop()
-        await ctx.send("I could not deliver privately. Enable DMs or message me directly.", **({"delete_after": 30} if ctx.guild else {}))
+        await ctx.send("I could not deliver to the requested destination. For private chat, enable DMs or message me directly.", **({"delete_after": 30} if ctx.guild else {}))
         return
     await view.generate(question)
 

@@ -511,9 +511,14 @@ Nextcloud is authoritative; completion requires its current ETag and refuses
 recurring or shared scheduling changes. The gateway's durable operation and
 one-shot reminder ledger lives outside MediaBot's database.
 
-`$ask` sends its response through a private DM. Guild questions must be deleted
-before inference. Follow-ups use bounded memory only; Discord still stores the
-messages. The bot reaches only an authenticated text gateway, outside the
+`$ask` replies in the originating channel. The leading `--private` flag
+requires deletion of the guild source before inference and a working private DM;
+there is no public fallback. A DM invocation stays in that DM. Current trusted
+server membership is fetched for nonowners, including private controls; access
+failure is closed. Buttons and modals bind the requester, guild and exact channel.
+Each view has its own bounded in-memory history; no Life permission is granted
+by shared chat access. Public follow-ups display the question as well as the
+answer. Discord still stores messages. The bot reaches only an authenticated text gateway, outside the
 unauthenticated model network. The gateway restricts model/context/output,
 checks a host GPU monitor, yields to competing media activity, and unloads the
 model after each request. Cancellation uses the same request UUID. Personal

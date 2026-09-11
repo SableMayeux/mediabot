@@ -304,6 +304,7 @@ class RuntimeHardeningTests(unittest.IsolatedAsyncioTestCase):
         previous_is_owner = app.bot.is_owner
         previous_get_link = app.get_link
         ctx = SimpleNamespace(
+            guild=SimpleNamespace(id=10),
             author=SimpleNamespace(
                 id=12,
                 guild_permissions=SimpleNamespace(administrator=False),

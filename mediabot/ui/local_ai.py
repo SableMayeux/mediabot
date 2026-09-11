@@ -1,4 +1,4 @@
-"""Private, short-lived local conversation with explicit cancellation."""
+"""Requester-bound local conversation in its original channel or private DM."""
 from __future__ import annotations
 
 import asyncio
@@ -32,6 +32,7 @@ class FollowupModal(discord.ui.Modal, title="Continue local conversation"):
         super().__init__(timeout=300)
         self.owner_view = view
         self.revision = view.revision
+        self.question.label = "Question (visible in this channel)" if not view.private else "Private question"
 
     async def on_submit(self, interaction):
         if not await self.owner_view.interaction_check(interaction):
@@ -41,8 +42,11 @@ class FollowupModal(discord.ui.Modal, title="Continue local conversation"):
 
 
 class LocalChatView(OwnerView):
-    def __init__(self, **kwargs):
+    def __init__(self, *, private=True, channel_id=None, authorize=None, **kwargs):
         super().__init__(timeout=600, **kwargs)
+        self.private = private
+        self.channel_id = channel_id
+        self.authorize = authorize
         self.history = []
         self.message = None
         self.active_request = None
@@ -52,12 +56,21 @@ class LocalChatView(OwnerView):
         self.rebuild()
 
     async def interaction_check(self, interaction):
-        allowed = (not self.closed and not self.is_finished() and self.guild_id is None
-                   and interaction.guild_id is None and interaction.user.id == self.actor_id
-                   and await self.bot.is_owner(interaction.user))
+        allowed = (not self.closed and not self.is_finished()
+                   and interaction.guild_id == self.guild_id and interaction.user.id == self.actor_id
+                   and (self.channel_id is None or interaction.channel_id == self.channel_id)
+                   and await (self.authorize(interaction.user) if self.authorize else self.bot.is_owner(interaction.user)))
         if not allowed:
-            await interaction.response.send_message("This private conversation is unavailable or expired. Open `$ask` again.", ephemeral=True)
+            await interaction.response.send_message("This conversation belongs to its requester, or your access has expired. Open `$ask` again.", ephemeral=True)
         return allowed
+
+    def destination_matches(self):
+        if self.message is None:
+            return False
+        message_guild = getattr(getattr(self.message, "guild", None), "id", None)
+        return (message_guild == self.guild_id
+                and (not self.private or message_guild is None)
+                and (self.channel_id is None or getattr(getattr(self.message, "channel", None), "id", None) == self.channel_id))
 
     def rebuild(self):
         self.revision += 1
@@ -75,8 +88,8 @@ class LocalChatView(OwnerView):
         fresh.callback = partial(self.fresh, revision=self.revision)
         self.add_item(fresh)
 
-    async def edit_private(self, **kwargs):
-        if self.message is None or self.guild_id is not None or getattr(self.message, "guild", None) is not None:
+    async def edit_response(self, **kwargs):
+        if not self.destination_matches():
             return False
         try:
             await self.message.edit(allowed_mentions=discord.AllowedMentions.none(), **kwargs)
@@ -94,15 +107,15 @@ class LocalChatView(OwnerView):
                 if interaction:
                     await interaction.followup.send("This conversation is busy or expired. Open a current question control.", ephemeral=True)
                 return
-            if self.message is None or self.guild_id is not None or getattr(self.message, "guild", None) is not None:
-                return  # An unavailable private destination must never cause public fallback or inference.
+            if not self.destination_matches():
+                return  # Never infer or fall back into a different destination.
             try:
                 messages = append_prompt(self.history, prompt)
             except LocalAIError as exc:
                 if interaction:
                     await interaction.followup.send(str(exc), ephemeral=True)
                 else:
-                    await self.edit_private(content=str(exc), view=self)
+                    await self.edit_response(content=str(exc), view=self)
                 return
             identity = self.active_request = str(uuid.uuid4())
             self.cancel_requested = None
@@ -111,7 +124,7 @@ class LocalChatView(OwnerView):
             async with self.lock:
                 if not self.current(identity):
                     return
-                if not await self.edit_private(content="Thinking locally...", embed=None, view=self):
+                if not await self.edit_response(content="Thinking locally...", embed=None, view=self):
                     return
             async with self.lock:
                 if not self.current(identity):
@@ -121,16 +134,18 @@ class LocalChatView(OwnerView):
                 if not self.current(identity):
                     return
                 if self.cancel_requested == identity:
-                    await self.edit_private(content="Response discarded after cancellation.", embed=None)
+                    await self.edit_response(content="Response discarded after cancellation.", embed=None)
                     return
                 self.history = messages + [{"role": "assistant", "content": result["text"]}]
                 embed = discord.Embed(title="Local conversation", description=result["text"][:3900])
+                if not self.private:
+                    embed.add_field(name="Question", value=str(prompt)[:1000], inline=False)
                 embed.set_footer(text="Llama 3.2 3B. No notes or web searched; no tools or actions. This conversation expires after 10 minutes.")
-                await self.edit_private(content=None, embed=embed)
+                await self.edit_response(content=None, embed=embed)
         except LocalAIError as exc:
             async with self.lock:
                 if self.current(identity):
-                    await self.edit_private(content=str(exc), embed=None)
+                    await self.edit_response(content=str(exc), embed=None)
         except asyncio.CancelledError:
             try:
                 await self.service.cancel(identity)
@@ -144,7 +159,7 @@ class LocalChatView(OwnerView):
                     self.cancel_requested = None
                     self.rebuild()
                     if not self.closed and not self.is_finished():
-                        await self.edit_private(view=self)
+                        await self.edit_response(view=self)
 
     async def cancel(self, interaction, *, request_id=_CURRENT, revision=None):
         if not await self.interaction_check(interaction):
@@ -192,7 +207,7 @@ class LocalChatView(OwnerView):
             self.history = []
             self.stop()
             self.rebuild()
-            await self.edit_private(view=None)
+            await self.edit_response(view=None)
         if identity:
             try:
                 await self.service.cancel(identity)

@@ -7,6 +7,17 @@ and this project uses semantic version numbers.
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-09-10
+
+### Changed
+
+- Let current members of the configured server use `$ask`, replying in the
+  originating channel by default. `$ask --private` retains fail-closed DM
+  delivery. Each conversation's history and controls remain requester-bound;
+  current membership is rechecked, and Life access remains owner-only.
+- Make `$help` work in DMs with the appropriate DM command list. Advertise
+  shared chat in normal server help and private Life utilities to the owner.
+
 ## [2.3.0] - 2026-09-10
 
 ### Added
