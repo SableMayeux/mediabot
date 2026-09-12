@@ -16,6 +16,7 @@ GATEWAY_NETWORKS = {
     "torrent_intake": "dogginator_torrent_intake",
     "life_intake": "life_intake",
     "local_ai_frontend": "local-ai_frontend",
+    "web_search_frontend": "mediabot_search_frontend",
 }
 
 

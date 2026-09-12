@@ -76,8 +76,10 @@ from mediabot.services.life_capture import LifeCaptureError, LifeCaptureService
 from mediabot.services.life_workflow import LifeWorkflowService
 from mediabot.ui.life_workflow import LifeLauncher
 from mediabot.services.local_ai import LocalAIService
+from mediabot.services.ai_access import AIAccessService, CAPABILITIES
+from mediabot.services.web_search import WebSearchService
 from mediabot.services.chat_access import allowed_chat_user
-from mediabot.ui.local_ai import LocalChatView, append_prompt, conversation_embed
+from mediabot.ui.local_ai import LocalChatView, append_prompt, conversation_embed, parse_ask_options
 from mediabot.ui.life_auto import promote_automatically
 from mediabot.services.local_ai import LocalAIError
 from mediabot.ui.torrent_review import TorrentReviewLauncher, review_role
@@ -157,7 +159,7 @@ PREFIX = "$"
 OWNER_DM_COMMANDS = frozenset({"think", "life"})
 ADMIN_DM_GUILDS = {}
 
-BOT_VERSION = "2.7.2"
+BOT_VERSION = "2.8.0"
 
 # discord.py normally wraps non-successful API responses in HTTPException, but
 # aiohttp connection failures can escape directly before Discord returns a
@@ -652,6 +654,8 @@ life_capture = (
 )
 life_workflow = LifeWorkflowService()
 local_ai = LocalAIService()
+ai_access = AIAccessService()
+web_search = WebSearchService()
 torrent_intake = TorrentIntakeService(
     base_url=TORRENT_INTAKE_URL,
     token_path=TORRENT_INTAKE_TOKEN_PATH,
@@ -9817,7 +9821,7 @@ async def mediabot_help(
                 description += "\n\nAdministrator access is checked against your selected server on each use. If you administer several, use `$admin server <server ID>`."
             await ctx.reply(description)
             return
-        lines = [f"`{prefix}ask <question>` - local conversation here in DM (current server members)",
+        lines = [f"`{prefix}ask [--web] <question>` - local conversation here in DM; --web retrieves cited sources",
                  f"`{prefix}help <command>` - command details"]
         if is_bot_owner:
             lines += [f"`{prefix}think [--auto] <text>` - save your private raw capture; --auto attempts one source-quoted task",
@@ -9828,9 +9832,11 @@ async def mediabot_help(
                       f"`{prefix}admin server [server ID]` - list or select the admin server for this DM"]
             if is_bot_owner:
                 lines += [f"`{prefix}admin users` / `{prefix}admin link @user SeerrUser` - request-account linking",
-                          f"`{prefix}admin integrations` / `{prefix}admin logs` / `{prefix}admin errors` - private diagnostics"]
+                          f"`{prefix}admin integrations` / `{prefix}admin logs` / `{prefix}admin errors` - private diagnostics",
+                          f"`{prefix}admin ai` - backend status and persistent user access"]
         embed = discord.Embed(title="MediaBot in DMs", description="\n".join(lines), color=discord.Color.blurple())
         embed.add_field(name="In the server", value="`$ask` answers in the channel. `$ask --private <question>` moves the answer to a DM. `$recommend --auto` optionally ranks provider suggestions with the local model. Media commands and torrent review currently require the configured server; an account link does not enable them in DMs.", inline=False)
+        embed.add_field(name="AI routing and search", value="Desktop AI is preferred only when it is on and your account has desktop access. Server fallback also requires server access. `--web` searches the current question and shows source links; follow-ups in that conversation search again. `--private` controls Discord delivery, not search-provider privacy.", inline=False)
         await ctx.reply(embed=embed)
         return
     can_use_torrent = is_bot_owner or is_administrator
@@ -9979,7 +9985,7 @@ async def mediabot_help(
         return
 
     if normalized_topic != "all":
-        embed.add_field(name="Local conversation", value=f"`{prefix}ask <question>` - answer in this channel\n`{prefix}ask --private <question>` - answer privately in DM", inline=False)
+        embed.add_field(name="Local conversation", value=f"`{prefix}ask <question>` - answer in this channel\n`{prefix}ask --web <question>` - search sources and answer with citations\n`{prefix}ask --web --private <question>` - web answer in DM\nDesktop AI is preferred when on and permitted for your account. Follow-ups retain web mode; only the current question is searched.", inline=False)
         if is_bot_owner:
             embed.add_field(name="Your private Life workspace", value=f"`{prefix}think [--auto] <text>` - save first; optionally classify one task\n`{prefix}life inbox` / `{prefix}life tasks` - captures, tasks and confirmed actions\nThese commands also work in your DM. Life storage is currently owner-only.", inline=False)
         if is_bot_owner or is_administrator:
@@ -10227,18 +10233,18 @@ async def local_chat_command_allowed(ctx):
     raise commands.CheckFailure("Local chat is available to current members of the configured server and the bot owner.")
 
 
-@bot.command(name="ask", help="Ask the local model in this channel. Use `$ask --private <question>` for DM delivery. Available to current server members; no notes, web lookup, or actions.")
+@bot.command(name="ask", help="Ask the local model here or in DM. Use `$ask --web <question>` to retrieve cited web sources, `$ask --private <question>` for DM delivery, or combine both flags before the question. Web queries are limited to 800 UTF-8 bytes. Follow-ups retain web mode and search only the new question, so include the subject again. Current server membership and AI access are checked each turn. Desktop is preferred when on and permitted; server fallback requires server access. No notes or actions. --private does not hide a --web query from search providers.")
 @commands.check(local_chat_command_allowed)
 @commands.cooldown(2, 30, commands.BucketType.user)
 async def ask(ctx, *, question: str = ""):
-    question = question.strip()
-    parts = question.split(maxsplit=1)
-    private_option = bool(parts and parts[0].casefold() == "--private")
-    if private_option:
-        question = parts[1].strip() if len(parts) > 1 else ""
+    try:
+        question, private_option, web = parse_ask_options(question)
+    except LocalAIError as exc:
+        await ctx.reply(str(exc))
+        return
     private = private_option or ctx.guild is None
     if not question:
-        await ctx.reply("Use `$ask <question>` for an answer here, or `$ask --private <question>` for a DM. This model does not search your notes or the web.")
+        await ctx.reply("Use `$ask <question>`, `$ask --web <question>` for cited web search, or add `--private` for DM delivery. Web queries go to search providers; your notes are never searched.")
         return
     try:
         append_prompt([], question)
@@ -10249,13 +10255,25 @@ async def ask(ctx, *, question: str = ""):
         await ctx.send("The local model is not configured yet.", **({"delete_after": 30} if ctx.guild else {}))
         return
     origin_guild_id = getattr(ctx.guild, "id", None)
+    async def permissions_for(user):
+        if not await allowed_chat_user(bot, user, ALLOWED_GUILD_IDS, guild_id=origin_guild_id):
+            raise LocalAIError("Your current server membership could not be verified. No response was published; open `$ask` again after restoring access.")
+        permissions = ai_access.access(user.id, owner=await bot.is_owner(user))
+        return {key: value["allowed"] for key, value in permissions.items()}
     async def authorize(user):
-        return await allowed_chat_user(bot, user, ALLOWED_GUILD_IDS, guild_id=origin_guild_id)
+        try:
+            permissions = await permissions_for(user)
+            return (permissions["server"] or permissions["desktop"]) and (not web or permissions["web"])
+        except LocalAIError:
+            return False
+    async def access_policy():
+        return await permissions_for(ctx.author)
     view = LocalChatView(bot=bot, service=local_ai, actor_id=ctx.author.id,
-        guild_id=None if private else origin_guild_id, private=private, authorize=authorize)
+        guild_id=None if private else origin_guild_id, private=private, authorize=authorize,
+        access_policy=access_policy, web_search=web_search, web=web)
     try:
         if private and ctx.guild is not None:
-            view.message = await ctx.author.send(embed=conversation_embed(question, "Opening a private local conversation..."),
+            view.message = await ctx.author.send(embed=conversation_embed(question, "Opening a private local conversation...", web=web),
                 allowed_mentions=discord.AllowedMentions.none())
         else:
             view.message = await ctx.reply("Opening a local conversation...", view=view, mention_author=False)
@@ -12670,6 +12688,7 @@ async def admin(ctx):
             "`$admin link @user SeerrUsername` - link accounts\n"
             "`$admin logs [lines]` - recent bot logs\n"
             "`$admin errors [lines]` - warnings/errors\n"
+            "`$admin ai` - AI backend status and per-user access\n"
         )
     await ctx.reply(
         (
@@ -12682,6 +12701,97 @@ async def admin(ctx):
             "These commands also work in DM. Account linking and diagnostics require the bot owner. Use `$help admin` for details."
         )
     )
+
+
+@admin.group(name="ai", invoke_without_command=True, help="Owner controls for AI backend status and persistent per-user server, desktop, and web access. These commands work in server channels and owner DMs.")
+@commands.is_owner()
+@require_admin_context()
+async def admin_ai(ctx):
+    await ctx.reply(
+        "**AI controls**\n"
+        "`$admin ai status` - server, desktop, and web availability\n"
+        "`$admin ai access @user` - effective permissions and overrides\n"
+        "`$admin ai allow @user desktop` - grant a capability\n"
+        "`$admin ai deny @user web` - revoke a capability\n"
+        "`$admin ai reset @user server` - restore that capability's default\n\n"
+        "Capabilities: `server`, `desktop`, `web`. Use a Discord user ID in DMs. "
+        "Overrides apply to that person across this bot and persist through restarts and desktop switching. "
+        "Defaults: server and web allowed for current server members; desktop owner-only. "
+        "The owner always retains access. Desktop-only users do not fall back to the server. "
+        "Use the DesktopAI shortcuts on the desktop to turn its GPU backend on or off."
+    )
+
+
+def ai_access_embed(member, permissions):
+    name = discord.utils.escape_markdown(discord.utils.escape_mentions(str(getattr(member, "display_name", member.id))))
+    embed = discord.Embed(title="AI access", description=f"{name} (`{member.id}`)", color=discord.Color.blurple())
+    for key in CAPABILITIES:
+        value = permissions[key]
+        embed.add_field(name=key.capitalize(), value=f"{'Allowed' if value['allowed'] else 'Denied'} ({value['source']})", inline=True)
+    embed.set_footer(text="Access is independent of availability. Current server membership is still required; follow-ups recheck permissions.")
+    return embed
+
+
+@admin_ai.command(name="access", help="Show effective AI permissions. Usage: $admin ai access @user (or Discord user ID in DM).")
+@commands.is_owner()
+@require_admin_context()
+async def admin_ai_access(ctx, discord_user: str):
+    member = await resolve_admin_member(ctx, discord_user)
+    permissions = ai_access.access(member.id, owner=await bot.is_owner(member))
+    await ctx.reply(embed=ai_access_embed(member, permissions), allowed_mentions=discord.AllowedMentions.none())
+
+
+async def change_ai_access(ctx, discord_user, capability, allowed):
+    member = await resolve_admin_member(ctx, discord_user)
+    try:
+        permissions = ai_access.set_access(member.id, str(capability).casefold(), allowed,
+            actor_id=ctx.author.id, owner=await bot.is_owner(member))
+    except ValueError as exc:
+        await ctx.reply(str(exc))
+        return
+    await ctx.reply(content="AI access saved. Future requests and active conversation controls use these permissions.",
+        embed=ai_access_embed(member, permissions), allowed_mentions=discord.AllowedMentions.none())
+
+
+@admin_ai.command(name="allow", help="Allow one AI capability. Usage: $admin ai allow @user server|desktop|web")
+@commands.is_owner()
+@require_admin_context()
+async def admin_ai_allow(ctx, discord_user: str, capability: str):
+    await change_ai_access(ctx, discord_user, capability, True)
+
+
+@admin_ai.command(name="deny", help="Deny one AI capability. Usage: $admin ai deny @user server|desktop|web")
+@commands.is_owner()
+@require_admin_context()
+async def admin_ai_deny(ctx, discord_user: str, capability: str):
+    await change_ai_access(ctx, discord_user, capability, False)
+
+
+@admin_ai.command(name="reset", help="Restore one default: server and web allowed, desktop denied. Usage: $admin ai reset @user server|desktop|web")
+@commands.is_owner()
+@require_admin_context()
+async def admin_ai_reset(ctx, discord_user: str, capability: str):
+    await change_ai_access(ctx, discord_user, capability, None)
+
+
+@admin_ai.command(name="status", help="Show current AI backend readiness and web configuration. The desktop's DesktopAI shortcuts control its on/off switch.")
+@commands.is_owner()
+@require_admin_context()
+async def admin_ai_status(ctx):
+    embed = discord.Embed(title="AI backend status", color=discord.Color.blurple())
+    try:
+        status = await local_ai.status() if local_ai.enabled else {}
+    except LocalAIError as exc:
+        await ctx.reply(f"Could not check AI backend readiness: {exc}")
+        return
+    for backend in ("server", "desktop"):
+        value = status.get(backend, {})
+        model = discord.utils.escape_markdown(str(value.get("model", "not reported")))[:100]
+        reason = discord.utils.escape_mentions(str(value.get("reason", "not configured or unavailable")))[:300]
+        embed.add_field(name=backend.capitalize(), value=f"{'Ready' if value.get('ready') is True else 'Unavailable'}\nModel: {model}\n{reason}", inline=False)
+    embed.add_field(name="Web search", value="Configured; each search reports its own result or failure." if web_search.enabled else "Not configured.", inline=False)
+    embed.add_field(name="How routing works", value="Desktop is preferred only when ready and permitted for that user. Server fallback requires server access. Desktop switching does not change permissions. Use the DesktopAI shortcuts on the desktop to turn it on or off.", inline=False)
+    await ctx.reply(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 
 @admin.command(name="server", help="List authorized servers or select one for admin commands in this DM. Usage: $admin server [server ID]")
@@ -13546,6 +13656,7 @@ async def main():
         life_capture.inbox_path.mkdir(mode=0o700, parents=True, exist_ok=True)
     init_db()
     init_tracking_db()
+    ai_access.initialize()
     recovery = recover_accepted_media_request_intents()
     if recovery["failed"]:
         raise RuntimeError(
@@ -13569,6 +13680,8 @@ async def main():
         await soulsync.start()
         await sonarr.start()
         await torrent_intake.start()
+        if web_search.enabled:
+            await web_search.start()
 
         try:
             await seerr.health()
@@ -13613,6 +13726,7 @@ async def main():
         await torrent_intake.close()
         await life_workflow.close()
         await local_ai.close()
+        await web_search.close()
         await sonarr.close()
         await soulsync.close()
         await jellyfin.close()

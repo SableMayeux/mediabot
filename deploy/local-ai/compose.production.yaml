@@ -1,0 +1,6 @@
+# Apply only after independent backup restore and measured release gates pass.
+services:
+  ollama:
+    restart: unless-stopped
+  gateway:
+    restart: unless-stopped

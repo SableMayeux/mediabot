@@ -7,6 +7,35 @@ and this project uses semantic version numbers.
 
 ## [Unreleased]
 
+## [2.8.0] - 2026-09-12
+
+### Added
+
+- `$ask --web` retrieves bounded public evidence through private SearXNG and
+  returns source cards with linked provenance and retrieval timestamps. Combine
+  it with `--private` for DM delivery. Original questions and full answers remain.
+- Optional Windows desktop GPU worker with a graphical On/Off switch, private
+  authenticated Tailscale HTTPS, pinned Gemma 4 12B QAT reasoning, resource checks,
+  idle unload, and termination limited to its owned model processes.
+- Desktop preference with server fallback only when the requester has access
+  to that backend. An interrupted accepted request is never replayed silently.
+- Owner `$admin ai status/access/allow/deny/reset` commands in server and DM,
+  with persistent independent permissions for server AI, desktop AI, and web
+  search. Current membership and permissions are checked for follow-ups and
+  before publishing a completed answer.
+- Publish the bounded server gateway, unchanged media-priority GPU monitor,
+  private search stack, desktop worker, and commissioning documentation.
+
+### Changed
+
+- Show the actual model, serving GPU, and evidence scope in conversation cards.
+  Search cancellation stops retrieval before inference; failed searches do not
+  claim a sourced answer. Query-only search keeps earlier chat history local.
+- Web conversations use bounded source context. Structured task extraction and
+  recommendation ranking keep their existing server-only profile and validators.
+- Gateway health stays independent of desktop availability. Cancellation also
+  interrupts connections established after a request was cancelled.
+
 ## [2.7.2] - 2026-09-12
 
 ### Changed

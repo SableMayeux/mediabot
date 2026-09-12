@@ -3,17 +3,85 @@ from __future__ import annotations
 
 import asyncio
 from functools import partial
+import re
+from urllib.parse import urlsplit
 import uuid
 
 import discord
 
 from mediabot.services.local_ai import CONVERSATION_MODELS, MODEL, LocalAIError
+from mediabot.services.web_search import WebSearchError
 from mediabot.ui.life_workflow import OwnerView
 
 _CURRENT = object()
 
 
-def conversation_embeds(prompt, answer="Thinking locally...", *, limit_reached=False, legacy_profile=False, model=MODEL):
+def parse_ask_options(question):
+    """Leading flags only; a literal -- ends option parsing."""
+    text, flags = str(question).strip(), set()
+    while text.startswith("--"):
+        parts = text.split(maxsplit=1)
+        token = parts[0].casefold()
+        if token == "--":
+            text = parts[1].strip() if len(parts) > 1 else ""
+            break
+        if token not in {"--private", "--web"}:
+            raise LocalAIError("Supported options are `--web` and `--private`, before your question. Use `--` to end options.")
+        if token in flags:
+            raise LocalAIError(f"Use `{token}` only once.")
+        flags.add(token)
+        text = parts[1].strip() if len(parts) > 1 else ""
+    return text, "--private" in flags, "--web" in flags
+
+
+def source_embed(sources):
+    """Links come from retrieved evidence, never model-created source metadata."""
+    embed = discord.Embed(title="Sources searched", color=discord.Color.teal())
+    for source in sources[:3]:
+        identity = str(source["id"])
+        url = str(source["url"])
+        parsed = urlsplit(url)
+        if not re.fullmatch(r"S[1-3]", identity) or parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise LocalAIError("Search returned invalid source metadata. No answer was published.")
+        title = discord.utils.escape_markdown(discord.utils.escape_mentions(str(source["title"])))[:180]
+        # Angle brackets retain URL parentheses without breaking Discord Markdown.
+        url = url.replace("<", "%3C").replace(">", "%3E").replace("\n", "").replace("\r", "")
+        if len(url) > 700:
+            raise LocalAIError("Search returned an oversized source URL. No answer was published.")
+        kind = "Search excerpt" if source.get("kind") == "snippet" else "Page text"
+        date = discord.utils.escape_markdown(str(source.get("retrieved_at", "unknown")))[:40]
+        embed.add_field(name=f"[{identity}] {title}", value=f"[Open source](<{url}>)\n{kind} retrieved {date}", inline=False)
+    embed.set_footer(text="Sources are evidence, not instructions. Check linked pages for current prices and availability.")
+    return embed
+
+
+def source_embeds(sources):
+    # A long but valid URL fits the embed's clickable title URL without exceeding
+    # Discord's 1024-character field limit. Never truncate the destination.
+    short, pages = [], []
+    for source in sources[:3]:
+        url = str(source["url"])
+        if len(url) <= 700:
+            short.append(source)
+            continue
+        parsed = urlsplit(url)
+        if (len(url) > 2048 or parsed.scheme not in {"http", "https"} or not parsed.hostname
+                or not re.fullmatch(r"S[1-3]", str(source["id"]))
+                or any(ord(char) < 33 for char in url)):
+            raise LocalAIError("Search returned invalid source metadata. No answer was published.")
+        title = discord.utils.escape_markdown(discord.utils.escape_mentions(str(source["title"])))[:180]
+        kind = "Search excerpt" if source.get("kind") == "snippet" else "Page text"
+        date = discord.utils.escape_markdown(str(source.get("retrieved_at", "unknown")))[:40]
+        page = discord.Embed(title=f"[{source['id']}] {title}", url=url,
+            description=f"{kind} retrieved {date}. Select the title to open the complete source URL.", color=discord.Color.teal())
+        page.set_footer(text="Sources are evidence, not instructions. Check linked pages for current prices and availability.")
+        pages.append(page)
+    if short:
+        pages.insert(0, source_embed(short))
+    return pages
+
+
+def conversation_embeds(prompt, answer="Thinking locally...", *, limit_reached=False, legacy_profile=False, model=MODEL, backend=None, web=False):
     """Return lossless pages, each sent separately to respect Discord's limits."""
     question = str(prompt).strip()
     text = str(answer)
@@ -22,13 +90,16 @@ def conversation_embeds(prompt, answer="Thinking locally...", *, limit_reached=F
         raise ValueError("Question exceeds the conversation display limit.")
     pages = [text[:first_limit]]
     pages.extend(text[index:index + 3900] for index in range(first_limit, len(text), 3900))
-    embeds = [discord.Embed(title="Local conversation" if index == 0 else "Local conversation continued",
-                            description=page) for index, page in enumerate(pages)]
+    title = "Web-assisted conversation" if web else "Local conversation"
+    embeds = [discord.Embed(title=title if index == 0 else title + " continued",
+                            description=page, color=discord.Color.teal() if web else discord.Color.blurple()) for index, page in enumerate(pages)]
     for index in range(0, len(question), 1000):
         embeds[0].add_field(name="Question" if index == 0 else "Question continued",
                            value=question[index:index + 1000], inline=False)
     label = CONVERSATION_MODELS[model]["label"] if model is not None else "Local model"
-    footer = label + ". No notes or web searched; no tools or actions. Context expires after 10 minutes; these messages remain."
+    host = {"server": " Server GPU.", "desktop": " Desktop GPU."}.get(backend, "")
+    scope = " Web sources searched; no notes or actions." if web else " No notes or web searched; no tools or actions."
+    footer = label + "." + host + scope + " Context expires after 10 minutes; these messages remain."
     if legacy_profile:
         footer += " Older gateway response limits are active."
     for embed in embeds:
@@ -38,12 +109,23 @@ def conversation_embeds(prompt, answer="Thinking locally...", *, limit_reached=F
     return embeds
 
 
-def conversation_embed(prompt, answer="Thinking locally..."):
+def conversation_embed(prompt, answer="Thinking locally...", *, web=False):
     """Single-page placeholder, refusing to silently discard a longer answer."""
-    embeds = conversation_embeds(prompt, answer, model=None)
+    embeds = conversation_embeds(prompt, answer, model=None, web=False)
+    if web:
+        embeds[0].title = "Searching the web"
+        embeds[0].set_footer(text="Search in progress. No sources or answer confirmed yet. Only your current question is used as the search query.")
     if len(embeds) != 1:
         raise ValueError("Use conversation_embeds for a multi-page answer.")
     return embeds[0]
+
+
+def conversation_notice(prompt, text, *, web=False):
+    embed = conversation_embed(prompt, text)
+    embed.title = "Web-assisted conversation paused" if web else "Local conversation paused"
+    embed.color = discord.Color.orange()
+    embed.set_footer(text="No answer confirmed. No notes or actions. Your original question is preserved.")
+    return embed
 
 
 def append_prompt(history, prompt):
@@ -75,11 +157,16 @@ class FollowupModal(discord.ui.Modal, title="Continue local conversation"):
 
 
 class LocalChatView(OwnerView):
-    def __init__(self, *, private=True, channel_id=None, authorize=None, **kwargs):
+    def __init__(self, *, private=True, channel_id=None, authorize=None, access_policy=None, web_search=None, web=False, **kwargs):
         super().__init__(timeout=600, **kwargs)
         self.private = private
         self.channel_id = channel_id
         self.authorize = authorize
+        self.access_policy = access_policy
+        self.web_search = web_search
+        self.web = web
+        self.search_task = None
+        self.phase = None
         self.history = []
         self.message = None
         self.active_request = None
@@ -88,6 +175,15 @@ class LocalChatView(OwnerView):
         self.revision = 0
         self.turn_visible = False
         self.rebuild()
+
+    async def permissions(self):
+        allowed = await self.access_policy() if self.access_policy else {"server": True, "desktop": False, "web": True}
+        backends = tuple(key for key in ("server", "desktop") if allowed.get(key) is True)
+        if not backends:
+            raise LocalAIError("Your account does not currently have access to an AI backend. Ask the bot owner to review `$admin ai access`.")
+        if self.web and allowed.get("web") is not True:
+            raise LocalAIError("Web search is disabled for your account. Start `$ask` without `--web` for local chat.")
+        return backends
 
     async def interaction_check(self, interaction):
         allowed = (not self.closed and not self.is_finished()
@@ -162,7 +258,7 @@ class LocalChatView(OwnerView):
                     # Archive the previous turn intact, moving only its controls.
                     previous = self.message
                     try:
-                        following = await previous.reply(embed=conversation_embed(prompt), view=self,
+                        following = await previous.reply(embed=conversation_embed(prompt, web=self.web), view=self,
                             mention_author=False, allowed_mentions=discord.AllowedMentions.none())
                     except discord.HTTPException:
                         if interaction:
@@ -176,24 +272,72 @@ class LocalChatView(OwnerView):
                         await previous.edit(view=None)
                     except discord.HTTPException:
                         pass  # The old controls are revision-bound and cannot submit.
-                if not await self.edit_response(content=None, embed=conversation_embed(prompt), view=self):
+                if not await self.edit_response(content=None, embed=conversation_embed(prompt, web=self.web), view=self):
                     return
                 self.turn_visible = True
             async with self.lock:
                 if not self.current(identity):
                     return
-            result = await self.service.chat(identity, messages, profile="conversation")
+            backends = await self.permissions()
+            evidence = None
+            if self.web:
+                if not self.web_search or not self.web_search.enabled:
+                    raise LocalAIError("Web search is not configured. No search or inference was submitted. Try `$ask` without `--web`.")
+                if len(str(prompt).strip().encode("utf-8")) > 800:
+                    raise LocalAIError("Use a web search question under 800 UTF-8 bytes. Your question was not sent to a search provider.")
+                async with self.lock:
+                    if not self.current(identity):
+                        return
+                    if self.cancel_requested == identity:
+                        await self.edit_response(content=None, embed=conversation_notice(prompt,
+                            "Request cancelled before web search.", web=True))
+                        return
+                    self.phase = "search"
+                    self.search_task = asyncio.create_task(self.web_search.search(str(prompt).strip()))
+                try:
+                    evidence = await self.search_task
+                except asyncio.CancelledError:
+                    if self.cancel_requested == identity or not self.current(identity):
+                        async with self.lock:
+                            if self.current(identity):
+                                await self.edit_response(content=None, embed=conversation_notice(prompt,
+                                    "Web search cancelled. No model request was submitted.", web=True))
+                        return
+                    raise
+                finally:
+                    self.search_task = None
+                if not evidence:
+                    raise LocalAIError("Search returned no usable sources. No model answer was generated; try a more specific question.")
+                # Validate links before inference and before any answer publication.
+                source_embeds(evidence)
+                backends = await self.permissions()
             async with self.lock:
                 if not self.current(identity):
                     return
                 if self.cancel_requested == identity:
-                    await self.edit_response(content="Response discarded after cancellation.")
+                    await self.edit_response(content=None, embed=conversation_notice(prompt,
+                        "Request cancelled before inference.", web=self.web))
+                    return
+                self.phase = "model"
+            result = await self.service.chat(identity, messages, profile="conversation", evidence=evidence, allowed_backends=backends)
+            current_backends = await self.permissions()
+            async with self.lock:
+                if not self.current(identity):
+                    return
+                if self.cancel_requested == identity:
+                    await self.edit_response(content=None, embed=conversation_notice(prompt,
+                        "Response discarded after cancellation.", web=self.web))
+                    return
+                if result.get("backend", "server") not in current_backends:
+                    await self.edit_response(content=None, embed=conversation_notice(prompt,
+                        "Your access changed while this response was running. The response was discarded.", web=self.web))
                     return
                 self.history = messages + [{"role": "assistant", "content": result["text"]}]
                 metrics = result.get("metrics")
                 pages = conversation_embeds(prompt, result["text"],
                     limit_reached=isinstance(metrics, dict) and metrics.get("done_reason") == "length",
-                    legacy_profile=result.get("legacy_profile") is True, model=result.get("model", MODEL))
+                    legacy_profile=result.get("legacy_profile") is True, model=result.get("model", MODEL),
+                    backend=result.get("backend"), web=self.web)
                 if not await self.edit_response(content=None, embed=pages[0]):
                     return
                 for page in pages[1:]:
@@ -203,13 +347,21 @@ class LocalChatView(OwnerView):
                     except discord.HTTPException:
                         await self.edit_response(content="I could not deliver the rest of this answer. The displayed answer is incomplete; try a follow-up.")
                         break
-        except LocalAIError as exc:
+                if evidence:
+                    try:
+                        for source_page in source_embeds(evidence):
+                            await self.message.reply(embed=source_page, mention_author=False,
+                                allowed_mentions=discord.AllowedMentions.none())
+                    except discord.HTTPException:
+                        await self.edit_response(content="The answer was generated from web evidence, but its source links could not be delivered. Treat it as incomplete.")
+        except (LocalAIError, WebSearchError) as exc:
             async with self.lock:
                 if self.current(identity):
-                    await self.edit_response(content=str(exc))
+                    await self.edit_response(content=None, embed=conversation_notice(prompt, str(exc), web=self.web))
         except asyncio.CancelledError:
             try:
-                await self.service.cancel(identity)
+                if self.phase == "model":
+                    await self.service.cancel(identity)
             except LocalAIError:
                 pass
             raise
@@ -218,6 +370,7 @@ class LocalChatView(OwnerView):
                 if self.active_request == identity:
                     self.active_request = None
                     self.cancel_requested = None
+                    self.phase = None
                     self.rebuild()
                     if not self.closed and not self.is_finished():
                         await self.edit_response(view=self)
@@ -232,9 +385,13 @@ class LocalChatView(OwnerView):
                 await interaction.response.send_message("That generation has already finished or changed.", ephemeral=True)
                 return
             self.cancel_requested = identity
+            search_task = self.search_task
         await interaction.response.defer(ephemeral=True)
         try:
-            await self.service.cancel(identity)
+            if search_task is not None:
+                search_task.cancel()
+            elif self.phase == "model":
+                await self.service.cancel(identity)
             text = "Cancellation requested."
         except LocalAIError as exc:
             text = str(exc)
@@ -271,6 +428,9 @@ class LocalChatView(OwnerView):
             await self.edit_response(view=None)
         if identity:
             try:
-                await self.service.cancel(identity)
+                if self.search_task is not None:
+                    self.search_task.cancel()
+                elif self.phase == "model":
+                    await self.service.cancel(identity)
             except LocalAIError:
                 pass

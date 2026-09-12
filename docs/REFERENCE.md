@@ -39,6 +39,9 @@ The default prefix is `$`.
 | `$admin server [server ID]` | List currently eligible servers, or select the server used by DM administration. |
 | `$admin users` | Bot owner and administrator: privately list Seerr accounts and their numeric IDs. |
 | `$admin link <Discord member or ID> <Seerr user or ID>` | Bot owner and administrator: map an existing Seerr account to a Discord member. |
+| `$admin ai status` | Bot owner and administrator: show current backend readiness and web configuration. |
+| `$admin ai access <Discord member or ID>` | Show that person's effective server, desktop and web permissions. |
+| `$admin ai allow\|deny\|reset <Discord member or ID> server\|desktop\|web` | Bot owner and administrator: persist an independent capability override or restore its default. |
 
 Private Life utilities require the bot owner:
 `$think <text>` (alias `$capture`) is owner-only and writes a private raw note.
@@ -58,6 +61,26 @@ the requester, in the original destination. Each conversation has separate
 temporary history. Public follow-up questions and answers are visible in the
 channel; use a new private conversation for private follow-ups. `$help` works
 in DMs; other household media commands still use the configured server.
+
+`$ask --web <question>` enables bounded web retrieval for that conversation.
+Combine `--web` and `--private` in either order before the question. Only the
+current question is searched, limited to 800 UTF-8 bytes; history is never sent
+as a search query. Up to three source records, totaling at most 6,000 UTF-8
+bytes of extracted text, accompany the local inference. Links, timestamps and
+page-versus-excerpt labels come from retrieval, not model-generated metadata.
+No usable sources means no inference. Cancellation covers retrieval as well as
+generation. Follow-ups retain web mode and repeat retrieval for the new query.
+
+Server and desktop inference permissions are independent. The gateway prefers
+an available permitted desktop and falls back only to a permitted server before
+work is accepted. It does not retry ambiguous or interrupted work on another
+backend. `web` permission controls source retrieval separately. Membership and
+effective permissions are rechecked before work and before publishing a result.
+Defaults grant current members server and web access, while desktop access is
+owner-only. Per-user overrides live in the existing database's additive
+`ai_access` table, apply across this bot's allowed servers and survive backend
+switches and restarts. Owner access cannot be revoked. These controls do not
+change Life, task classification or recommendation permissions.
 
 `$admin` and its subcommands also work in DMs. The caller must currently be an
 administrator of an allowlisted server; the bot owner's status alone does not
@@ -179,6 +202,7 @@ health snapshots, recovery bundles or provider credentials. Do not `source`
 | Raw capture | `LIFE_CAPTURE_PATH`, normally `/app/data/life-inbox` in the portable volume. Blank disables capture. |
 | Life gateway | `LIFE_GATEWAY_URL`, `LIFE_GATEWAY_TOKEN_PATH`, `NEXTCLOUD_PUBLIC_ORIGIN`. Requires its own service, owner allowlist, Nextcloud app credential, network and readable token mount. |
 | Local AI gateway | `LOCAL_AI_URL`, `LOCAL_AI_TOKEN_PATH`. Requires its own bounded authenticated gateway and model service; these are not Ollama API settings. |
+| Web search | `WEB_SEARCH_URL`. Optional private SearXNG JSON search endpoint, commissioned separately. The bot retrieves bounded public web evidence without search-provider credentials or model action tools. |
 | Torrent gateway | `TORRENT_INTAKE_URL`, `TORRENT_INTAKE_TOKEN_PATH`. Requires the matching narrow gateway and its VPN/quarantine/review services. Do not substitute qBittorrent's admin URL. |
 
 Blank optional provider URL/key pairs leave those integrations disabled. Merely

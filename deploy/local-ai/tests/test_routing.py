@@ -1,0 +1,149 @@
+import importlib.util
+import json
+from pathlib import Path
+import unittest
+import time
+from unittest.mock import MagicMock, patch
+
+
+spec = importlib.util.spec_from_file_location('routing_gateway', Path(__file__).resolve().parents[1] / 'bin/gateway.py')
+G = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(G)
+ID = '12345678-1234-4abc-8def-123456789abc'
+MESSAGES = [{'role': 'user', 'content': 'What changed?'}]
+EVIDENCE = [{'id': 'S1', 'title': 'Example source', 'url': 'https://example.com/',
+             'text': 'A bounded piece of quoted evidence.', 'retrieved_at': '2026-09-12T00:00:00Z', 'kind': 'page'}]
+
+
+class RoutingTests(unittest.TestCase):
+    def test_cancel_monitor_interrupts_socket_created_after_initial_cancel(self):
+        job = G.Job(ID)
+        connection = MagicMock()
+        connection.sock = None
+        late_socket = MagicMock()
+        def delayed_dispatch(*args):
+            job.cancel()
+            connection.sock = late_socket
+            deadline = time.monotonic() + 1
+            while not late_socket.shutdown.called and time.monotonic() < deadline:
+                time.sleep(0.01)
+            raise ConnectionResetError()
+        connection.request.side_effect = delayed_dispatch
+        with patch.object(G.http.client, 'HTTPConnection', side_effect=[connection, MagicMock()]):
+            with self.assertRaisesRegex(RuntimeError, 'cancelled'):
+                G.chat(job, MESSAGES)
+        late_socket.shutdown.assert_called()
+
+    def test_healthcheck_never_waits_for_optional_desktop(self):
+        handler = object.__new__(G.Handler)
+        handler.path = '/v1/health'
+        handler.authorized = MagicMock(return_value=True)
+        handler.send = MagicMock()
+        with patch.object(G, 'guard_state', return_value=(True, 'ready')), patch.object(G, 'desktop_status') as desktop:
+            handler.do_GET()
+        desktop.assert_not_called()
+        self.assertEqual(handler.send.call_args.args[0], 200)
+
+    def test_cancellation_between_route_selection_and_chat_never_opens_runtime(self):
+        job = G.Job(ID)
+        job.cancelled.set()
+        with patch.object(G.http.client, 'HTTPConnection') as connection:
+            with self.assertRaisesRegex(RuntimeError, 'cancelled'):
+                G.chat(job, MESSAGES)
+        connection.assert_not_called()
+
+    def test_allowed_desktop_precedes_server_without_requiring_server_gpu(self):
+        job = G.Job(ID)
+        with patch.object(G, 'desktop_status', return_value={'ready': True}), \
+                patch.object(G, 'forward_desktop', return_value={'backend': 'desktop'}) as desktop, \
+                patch.object(G, 'chat') as server, patch.object(G, 'guard_state') as guard:
+            result = G.route_chat(job, MESSAGES, profile='conversation', evidence=EVIDENCE,
+                                  allowed_backends=['server', 'desktop'])
+        self.assertEqual(result['backend'], 'desktop')
+        desktop.assert_called_once_with(job, MESSAGES, EVIDENCE)
+        server.assert_not_called()
+        guard.assert_not_called()
+
+    def test_offline_desktop_falls_back_only_with_server_permission(self):
+        for backends in (['server', 'desktop'], ['desktop']):
+            with self.subTest(backends=backends), patch.object(G, 'desktop_status', return_value={'ready': False}), \
+                    patch.object(G, 'guard_state', return_value=(True, 'ready')), \
+                    patch.object(G, 'chat', return_value={'backend': 'server'}) as server:
+                if 'server' in backends:
+                    self.assertEqual(G.route_chat(G.Job(ID), MESSAGES, profile='conversation',
+                                                 allowed_backends=backends)['backend'], 'server')
+                    server.assert_called_once()
+                else:
+                    with self.assertRaisesRegex(RuntimeError, 'desktop_unavailable_no_fallback'):
+                        G.route_chat(G.Job(ID), MESSAGES, profile='conversation', allowed_backends=backends)
+                    server.assert_not_called()
+
+    def test_server_only_never_even_probes_desktop(self):
+        with patch.object(G, 'desktop_status') as desktop, patch.object(G, 'guard_state', return_value=(True, 'ready')), \
+                patch.object(G, 'chat') as server:
+            G.route_chat(G.Job(ID), MESSAGES, profile='conversation', allowed_backends=['server'])
+        desktop.assert_not_called()
+        server.assert_called_once()
+
+    def test_forwarded_timeout_or_rejection_never_starts_server(self):
+        with patch.object(G, 'desktop_status', return_value={'ready': True}), \
+                patch.object(G, 'forward_desktop', side_effect=RuntimeError('desktop_request_interrupted')), \
+                patch.object(G, 'chat') as server:
+            with self.assertRaisesRegex(RuntimeError, 'desktop_request_interrupted'):
+                G.route_chat(G.Job(ID), MESSAGES, profile='conversation', allowed_backends=['server', 'desktop'])
+        server.assert_not_called()
+
+    def test_server_fallback_preserves_gpu_guard(self):
+        with patch.object(G, 'guard_state', return_value=(False, 'foreign_gpu_workload')), patch.object(G, 'chat') as server:
+            with self.assertRaisesRegex(RuntimeError, 'foreign_gpu_workload'):
+                G.route_chat(G.Job(ID), MESSAGES)
+        server.assert_not_called()
+
+    def test_cancelled_job_is_never_admitted_or_forwarded(self):
+        job = G.Job(ID)
+        job.cancelled.set()
+        with patch.object(G, 'desktop_status') as desktop, patch.object(G, 'chat') as server:
+            with self.assertRaisesRegex(RuntimeError, 'cancelled'):
+                G.route_chat(job, MESSAGES, profile='conversation', allowed_backends=['desktop'])
+        desktop.assert_not_called()
+        server.assert_not_called()
+
+    def test_structured_contract_rejects_evidence_and_desktop(self):
+        base = {'request_id': ID, 'messages': MESSAGES}
+        for extra in ({'evidence': EVIDENCE}, {'allowed_backends': ['desktop']}, {'allowed_backends': []},
+                      {'allowed_backends': ['server', 'server']}, {'allowed_backends': ['remote']},
+                      {'allowed_backends': [{}]}):
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                G.validate({**base, **extra})
+        self.assertEqual(G.validate({**base, 'profile': 'conversation', 'evidence': EVIDENCE,
+                                     'allowed_backends': ['desktop']}), (ID, MESSAGES))
+
+    def test_source_budget_schema_and_provenance(self):
+        for change in ({'text': 'x' * 6001}, {'id': 'S99'}, {'kind': 'instruction'},
+                       {'url': 'http://user:password@example.com'}, {'text': ''}, {'extra': 'x'}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                G.validate_evidence([{**EVIDENCE[0], **change}])
+        self.assertEqual(G.source_metadata(EVIDENCE)[0]['id'], 'S1')
+        self.assertNotIn('text', G.source_metadata(EVIDENCE)[0])
+
+    def test_desktop_response_must_match_supplied_sources_and_pinned_model(self):
+        valid = {'request_id': ID, 'text': 'Answer [S1]', 'model': G.DESKTOP_MODEL,
+                 'model_manifest_sha256': G.DESKTOP_DIGEST, 'profile': 'conversation', 'backend': 'desktop',
+                 'retrieval_used': True, 'sources': G.source_metadata(EVIDENCE), 'tools_used': ['web_search']}
+        with patch.object(G, 'desktop_request', return_value=(200, valid)):
+            self.assertEqual(G.forward_desktop(G.Job(ID), MESSAGES, EVIDENCE), valid)
+        for change in ({'model_manifest_sha256': 'other'}, {'sources': []}, {'backend': 'server'},
+                       {'tools_used': ['shell']}, {'retrieval_used': False}):
+            with self.subTest(change=change), patch.object(G, 'desktop_request', return_value=(200, {**valid, **change})):
+                with self.assertRaisesRegex(RuntimeError, 'desktop_response_mismatch'):
+                    G.forward_desktop(G.Job(ID), MESSAGES, EVIDENCE)
+
+    def test_desktop_endpoint_cannot_be_plaintext_or_arbitrary_public_host(self):
+        for value in ('http://example.ts.net:8445', 'https://example.org', 'https://x.ts.net@evil.org',
+                      'https://x.ts.net/path', 'https://x.ts.net?token=x'):
+            with self.subTest(value=value), patch.object(G, 'DESKTOP_URL', value), self.assertRaises(ValueError):
+                G.desktop_connection(2)
+
+
+if __name__ == '__main__':
+    unittest.main()

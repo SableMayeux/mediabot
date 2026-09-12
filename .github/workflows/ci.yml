@@ -44,11 +44,14 @@ jobs:
 
       - name: Check deployment script syntax
         run: |
-          test -x scripts/deploy_v272.sh
-          sh -n scripts/deploy_v272.sh
+          test -x scripts/deploy_v280.sh
+          sh -n scripts/deploy_v280.sh
 
       - name: Run full unit-test suite
         run: python -m unittest discover -s tests -q
+
+      - name: Check optional server gateway boundaries
+        run: python -m unittest discover -s deploy/local-ai/tests -q
 
   fresh-install:
     name: Clean Docker installation

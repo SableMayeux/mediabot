@@ -1,0 +1,57 @@
+{
+  "ollama_image": {
+    "repository": "ollama/ollama",
+    "tag": "0.34.0",
+    "index_digest": "sha256:684d8674b4315fa18f4f0e973a118ec2652ed96f67563277839985175858e0ba",
+    "amd64_digest": "sha256:aa6f86f01fee264c81f1edd9083ebfb07c8116d95d8bedd1ad470874b66a40b4",
+    "compressed_layer_bytes": 3703343224
+  },
+  "python_image": {
+    "repository": "library/python",
+    "tag": "3.13.12-slim-bookworm",
+    "index_digest": "sha256:a58daefb915e1e03ad48f3ca4df8832065412c5c35cacb9d39f4229184de12b6",
+    "amd64_digest": "sha256:3121f8b0804aa3698ab750d9a39ea4a42657a385c9b133722b915e55c51551a6",
+    "compressed_layer_bytes": 44232113
+  },
+  "model": {
+    "name": "llama3.2:3b-instruct-q4_K_M",
+    "manifest_digest": "sha256:a80c4f17acd55265feec403c7aef86be0c25983ab279d83f3bcd3abbcb5b8b72",
+    "download_bytes": 2019393189,
+    "manifest": {
+      "schemaVersion": 2,
+      "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+      "config": {
+        "mediaType": "application/vnd.docker.container.image.v1+json",
+        "digest": "sha256:34bb5ab01051a11372a91f95f3fbbc51173eed8e7f13ec395b9ae9b8bd0e242b",
+        "size": 561
+      },
+      "layers": [
+        {
+          "mediaType": "application/vnd.ollama.image.model",
+          "digest": "sha256:dde5aa3fc5ffc17176b5e8bdc82f587b24b2678c6c66101bf7da77af9f7ccdff",
+          "size": 2019377376
+        },
+        {
+          "mediaType": "application/vnd.ollama.image.template",
+          "digest": "sha256:966de95ca8a62200913e3f8bfbf84c8494536f1b94b49166851e76644e966396",
+          "size": 1429
+        },
+        {
+          "mediaType": "application/vnd.ollama.image.license",
+          "digest": "sha256:fcc5a6bec9daf9b561a68827b67ab6088e1dba9d1fa2a50d7bbcc8384e0a265d",
+          "size": 7711
+        },
+        {
+          "mediaType": "application/vnd.ollama.image.license",
+          "digest": "sha256:a70ff7e570d97baaf4e62ac6e6ad9975e04caa6d900d3742d37698494479e0cd",
+          "size": 6016
+        },
+        {
+          "mediaType": "application/vnd.ollama.image.params",
+          "digest": "sha256:56bb8bd477a519ffa694fc449c2413c6f0e1d3b1c88fa7e3c9d88d3ae49d4dcb",
+          "size": 96
+        }
+      ]
+    }
+  }
+}

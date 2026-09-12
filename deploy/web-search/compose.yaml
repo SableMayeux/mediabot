@@ -1,0 +1,47 @@
+# Optional search stack. Run from this directory, after creating .env.
+name: mediabot-web-search
+services:
+  web-search:
+    # Official GHCR multi-architecture manifest, observed 2026-09-12.
+    # SearXNG 2026.9.12-d4f00d15d, upstream commit d4f00d15d4c2b8260124a9039b80bc9c1c26499b.
+    image: ghcr.io/searxng/searxng@sha256:1f3720f59a0361592dc942e4be50e0ebb63c112d915883fcb78a011995fffb47
+    restart: unless-stopped
+    init: true
+    user: "977:977"
+    read_only: true
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 128
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?Create .env with a random SEARXNG_SECRET before starting}
+      SEARXNG_BASE_URL: http://web-search:8080/
+      FORCE_OWNERSHIP: "false"
+      GRANIAN_HOST: "0.0.0.0"
+      GRANIAN_PORT: "8080"
+      GRANIAN_WORKERS: "1"
+      GRANIAN_ACCESS_LOG: "false"
+    volumes:
+      - ./settings.yml:/etc/searxng/settings.yml:ro
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+      - /var/cache/searxng:size=32m,uid=977,gid=977,mode=0700
+    # No published ports. Only explicitly connected containers can query it.
+    networks: [frontend, outbound]
+    healthcheck:
+      test: [CMD, /usr/local/searxng/.venv/bin/python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+networks:
+  frontend:
+    name: mediabot_search_frontend
+    internal: true
+  outbound: {}

@@ -161,8 +161,8 @@ source deletion fail, inference stops. Asking directly in DM keeps the exchange
 there. Public questions and answers remain visible in Discord.
 
 The local model sees the question and that conversation's limited temporary
-history. It cannot read your notes, browse channels, search the web, execute
-commands or change tasks. Follow-up controls retain the previous messages.
+history. It cannot read your notes, browse channels, execute commands or change
+tasks. Follow-up controls retain the previous messages.
 Context expires after ten minutes; Discord's messages do not. This is not
 persistent model memory.
 
@@ -173,10 +173,64 @@ answer instead of silently cutting it off; continuation replies are used when
 the answer and question exceed Discord's embed limit. The original question
 stays visible. A legacy gateway still works, with its older limits identified.
 
-Current prices, sales and news still need a current source. This chat has no
-web-search tool. A different model can improve reasoning, but cannot verify a
-live Nintendo sale from its training data. Automated task classification and
-recommendation ranking use their separate bounded profile and existing checks.
+For current prices, sales or news, explicitly enable web search:
+
+```text
+$ask --web What Nintendo eShop deals are available in the US today?
+$ask --web --private Compare these current offers
+```
+
+Put flags before the question, in either order. Queries are limited to 800
+UTF-8 bytes. The bot retrieves up to three sources, then gives their bounded
+text to the local model. The answer has a source card with original links,
+retrieval timestamps and labels identifying search excerpts when full pages
+could not be read. Citation markers such as `[S1]` correspond to those cards.
+If retrieval fails, the bot says so and does not generate an unsourced answer.
+Retrieved text is untrusted evidence and cannot trigger homelab actions.
+
+Follow-ups retain web mode and search the new question again. Only the current
+question goes to search providers, so repeat the topic in questions such as
+"Which of those Nintendo deals is cheapest?" Previous conversation messages
+remain local to the configured model gateway. `--private` controls Discord
+delivery; it does not keep a web search query private from upstream providers.
+Use **Cancel generation** to stop either search or model generation. **New
+topic** clears temporary context; start a fresh `$ask` to change web mode.
+
+The reply footer identifies the actual model and server or desktop GPU. When
+the optional desktop backend is on, ready and permitted for your account, new
+conversations and follow-ups prefer it. Turning it off or sleeping the desktop
+allows new requests to use the server only if you have server access. An
+interrupted generation is not silently retried on another GPU. The desktop
+on/off switch does not change anybody's permissions. Automated task
+classification and recommendation ranking retain their separate bounded
+server profile and existing checks.
+
+### Owner controls for AI access
+
+The bot owner can run the same commands in the configured server or in DM:
+
+```text
+$admin ai status
+$admin ai access @member
+$admin ai allow @member desktop
+$admin ai deny @member web
+$admin ai reset @member web
+```
+
+Use a Discord user ID in place of the mention in DMs. Each user has independent
+`server`, `desktop` and `web` permissions. The defaults allow current server
+members to use server AI and web search; desktop AI starts owner-only. An
+explicit allow or deny persists across bot restarts and desktop switching.
+`reset` removes that override. To make someone desktop-only, allow `desktop`
+and deny `server`; while the desktop is unavailable, that person receives an
+availability message rather than falling back to an unpermitted model.
+
+Current membership remains required, and each follow-up checks permission
+again. The owner always retains access. AI grants apply across this bot's
+configured servers and do not grant Life storage, media administration or
+access to another person's conversation. `$admin ai status` reports backend
+readiness separately from permissions. Use the DesktopAI shortcuts on the
+desktop to operate its switch.
 
 Life is currently an **owner-only integration**, not a shared task service for
 every member. With its separately provisioned gateway:

@@ -35,6 +35,7 @@ services:
       NEXTCLOUD_PUBLIC_ORIGIN: https://mediaserver.tail9c0ded.ts.net:8443
       LOCAL_AI_URL: http://local-ai-gateway:8080
       LOCAL_AI_TOKEN_PATH: /run/secrets/local_ai_token
+      WEB_SEARCH_URL: http://web-search:8080
 
     secrets:
       - torrent_intake_token
@@ -60,7 +61,7 @@ services:
         - --path
         - /app/data/runtime-health.json
         - --version
-        - 2.7.2
+        - 2.8.0
         - --max-age
         - "120"
       interval: 30s
@@ -73,6 +74,7 @@ services:
       - torrent_intake
       - life_intake
       - local_ai_frontend
+      - web_search_frontend
 
     logging:
       driver: json-file
@@ -98,3 +100,7 @@ networks:
   local_ai_frontend:
     external: true
     name: local-ai_frontend
+
+  web_search_frontend:
+    external: true
+    name: mediabot_search_frontend

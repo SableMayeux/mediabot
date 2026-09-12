@@ -4,7 +4,7 @@
 MediaBot connects your server to your existing media stack, with search cards,
 confirmation buttons, account-linked requests and progress receipts.
 
-Current source version: **2.7.2**. Get stable source releases and change notes from
+Current source version: **2.8.0**. Get stable source releases and change notes from
 [Releases](https://github.com/SableMayeux/mediabot/releases).
 
 ```text
@@ -57,6 +57,7 @@ in Seerr first. See [private administration](docs/USAGE.md#private-administratio
 | Private raw `$think` captures | Bot owner's persistent inbox | Available in the bot data volume |
 | `$life` task/calendar workflow | Separate Life gateway + Nextcloud | Advanced setup, owner-only |
 | `$ask`, `$think --auto`, `$recommend --auto` | Separate authenticated local AI gateway/model | Advanced setup; no model downloaded by the installer |
+| `$ask --web` and optional desktop AI | Private SearXNG and optional Windows GPU worker | [Advanced AI setup](docs/AI.md), independent per-user access |
 | `$torrent` intake and manual approval | Separate VPN/quarantine/review gateway | Advanced setup; no qBittorrent or VPN installed here |
 | Multi-user Life, Home Assistant and voice devices | Additional services and enrollment | Not included in this installer |
 
@@ -87,3 +88,5 @@ Existing custom deployments should read the
 their Compose configuration.
 
 Licensed under [GNU GPL version 3 only](LICENSE), `GPL-3.0-only`.
+
+Local models, source-backed answers, desktop GPU sharing, and owner access controls: [AI guide](docs/AI.md).

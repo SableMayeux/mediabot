@@ -1,0 +1,23 @@
+[Unit]
+Description=Private local text AI stack
+Requires=docker.service
+PartOf=docker.service
+Wants=local-ai-gpu-watch.service
+After=docker.service
+Before=local-ai-gpu-watch.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=localai
+Group=localai
+SupplementaryGroups=docker
+WorkingDirectory=/opt/stacks/local-ai
+Environment=LOCAL_AI_ROOT=/opt/stacks/local-ai
+ExecStart=/usr/bin/docker compose -f compose.yaml -f compose.production.yaml --profile candidate up -d --no-build --pull never
+ExecStop=/usr/bin/docker compose -f compose.yaml -f compose.production.yaml --profile candidate down
+TimeoutStartSec=90
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target

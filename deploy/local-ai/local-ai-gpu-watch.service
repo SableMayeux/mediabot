@@ -1,0 +1,32 @@
+[Unit]
+Description=Media-priority admission and preemption for local text AI
+Requires=docker.service local-ai-stack.service
+PartOf=local-ai-stack.service
+After=docker.service local-ai-stack.service
+
+[Service]
+Type=simple
+User=localai
+Group=localai
+SupplementaryGroups=docker
+Environment=DOCKER_CONFIG=/run/local-ai-docker-config
+ExecStart=/usr/bin/python3 /opt/stacks/local-ai/app/gpu-watch.py --state-dir /opt/stacks/local-ai/gpu-state --manage
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/stacks/local-ai/gpu-state
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+UMask=0022
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

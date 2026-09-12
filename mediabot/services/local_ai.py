@@ -1,4 +1,4 @@
-"""Fixed local text API. No note retrieval, web access, or state-changing tools."""
+"""Authenticated local AI routing with bounded web evidence and pinned models."""
 from __future__ import annotations
 
 import asyncio
@@ -17,6 +17,10 @@ CONVERSATION_MODELS = {
     "qwen3.5:4b": {
         "digest": "sha256:2a654d98e6fba55d452b7043684e9b57a947e393bbffa62485a7aac05ee4eefd",
         "label": "Qwen 3.5 4B",
+    },
+    "gemma4:12b-it-qat": {
+        "digest": "sha256:38044be4f923e5a55264ed7df4eaac2676651a905f735197c504045140c02bd3",
+        "label": "Gemma 4 12B",
     },
 }
 
@@ -54,6 +58,29 @@ def validate_identity(value):
     except (ValueError, TypeError, AttributeError) as exc:
         raise LocalAIError("Invalid request identity.") from exc
     return value
+
+
+def validate_evidence(evidence):
+    if not isinstance(evidence, list) or len(evidence) > 3:
+        raise LocalAIError("Use up to three bounded web sources.")
+    total = 0
+    for index, source in enumerate(evidence, 1):
+        if (not isinstance(source, dict)
+                or set(source) != {"id", "title", "url", "text", "retrieved_at", "kind"}
+                or any(not isinstance(value, str) for value in source.values())
+                or source["id"] != "S" + str(index) or source["kind"] not in ("page", "snippet")
+                or not source["text"].strip() or not 0 < len(source["title"]) <= 180
+                or not 0 < len(source["retrieved_at"]) <= 40 or len(source["url"]) > 2048):
+            raise LocalAIError("Invalid web evidence.")
+        parsed = urlsplit(source["url"])
+        if (parsed.scheme not in ("http", "https") or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None
+                or any(ord(c) < 33 for c in source["url"])):
+            raise LocalAIError("Invalid web source URL.")
+        total += len(source["text"].encode("utf-8"))
+    if total > 6000:
+        raise LocalAIError("Web evidence exceeds the context budget.")
+    return evidence
 
 
 class LocalAIService:
@@ -97,7 +124,7 @@ class LocalAIService:
         try:
             options = {"json": payload, "allow_redirects": False}
             if payload.get("profile") == "conversation":
-                options["timeout"] = aiohttp.ClientTimeout(total=135)
+                options["timeout"] = aiohttp.ClientTimeout(total=195 if "desktop" in payload.get("allowed_backends", []) else 135)
             async with self.session.post(self.base_url + route, **options) as response:
                 raw = bytearray()
                 async for chunk in response.content.iter_chunked(8192):
@@ -121,6 +148,10 @@ class LocalAIService:
                         raise LocalAIError("The local model's GPU safety monitor is unavailable. Try again after it recovers.")
                     if code == "request_timeout":
                         raise LocalAIError("Local generation reached its deadline. Try a shorter question.")
+                    if code == "desktop_unavailable_no_fallback":
+                        raise LocalAIError("Desktop AI is off, busy, or unavailable. Your account does not have server fallback access.")
+                    if code in {"desktop_request_interrupted", "desktop_request_failed", "desktop_response_mismatch"}:
+                        raise LocalAIError("Desktop AI did not finish this request. It was not retried on another GPU. Try again when the desktop is available.")
                     if (response.status == 400 and code == "invalid_request"
                             and payload.get("profile") == "conversation"):
                         raise _ConversationProfileUnsupported("The gateway uses the older generation protocol.")
@@ -133,7 +164,29 @@ class LocalAIService:
             raise LocalAIError("The local model did not finish. It cannot change tasks or calendar events.") from exc
         return body
 
-    async def chat(self, request_id, messages, *, profile="structured"):
+    async def status(self):
+        await self.start()
+        try:
+            async with self.session.get(self.base_url + "/v1/status", allow_redirects=False,
+                                        timeout=aiohttp.ClientTimeout(total=8)) as response:
+                raw = bytearray()
+                async for chunk in response.content.iter_chunked(4096):
+                    raw.extend(chunk)
+                    if len(raw) > 16384:
+                        raise LocalAIError("AI gateway status is oversized.")
+                if response.status != 200:
+                    raise LocalAIError("AI gateway status is unavailable.")
+                body = json.loads(raw)
+                if (not isinstance(body, dict) or body.get("model") != MODEL
+                        or body.get("model_manifest_sha256") != MODEL_DIGEST
+                        or any(not isinstance(body.get(key), dict) or type(body[key].get("ready")) is not bool
+                               for key in ("server", "desktop"))):
+                    raise LocalAIError("AI gateway status needs the current gateway release.")
+                return body
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+            raise LocalAIError("AI gateway status is unavailable.") from exc
+
+    async def chat(self, request_id, messages, *, profile="structured", evidence=None, allowed_backends=("server",)):
         validate_identity(request_id)
         if profile not in ("structured", "conversation"):
             raise LocalAIError("Unsupported generation profile.")
@@ -144,22 +197,39 @@ class LocalAIService:
             raise LocalAIError("Invalid conversation.")
         if sum(len(m["content"].encode("utf-8")) for m in messages) > 3000:
             raise LocalAIError("Keep the conversation under 3000 UTF-8 bytes.")
+        evidence = validate_evidence([] if evidence is None else evidence)
+        if (not isinstance(allowed_backends, (list, tuple)) or not 1 <= len(allowed_backends) <= 2
+                or any(not isinstance(b, str) or b not in ("server", "desktop") for b in allowed_backends)
+                or len(set(allowed_backends)) != len(allowed_backends)):
+            raise LocalAIError("Your account has no permitted AI backend.")
+        if profile == "structured" and (evidence or list(allowed_backends) != ["server"]):
+            raise LocalAIError("Structured work uses the server without web search.")
         payload = {"request_id": request_id, "messages": messages}
         legacy_profile = False
         if profile == "conversation":
             payload["profile"] = profile
+        if evidence:
+            payload["evidence"] = evidence
+        if list(allowed_backends) != ["server"]:
+            payload["allowed_backends"] = list(allowed_backends)
         try:
             body = await self.request("/v1/chat", payload)
         except _ConversationProfileUnsupported:
+            if evidence or list(allowed_backends) != ["server"]:
+                raise LocalAIError("Web search and desktop routing need the current AI gateway release.") from None
             # A definite 400 means the legacy gateway did not admit this request.
             # Never retry a timeout, disconnect, resource failure, or ambiguous result.
             legacy_profile = True
             body = await self.request("/v1/chat", {"request_id": request_id, "messages": messages})
         model = body.get("model")
+        backend = body.get("backend", "server")
+        expected_sources = [{key: value for key, value in source.items() if key != "text"} for source in evidence]
         accepted = CONVERSATION_MODELS if profile == "conversation" and not legacy_profile else {MODEL: CONVERSATION_MODELS[MODEL]}
         if (body.get("request_id") != request_id or not isinstance(body.get("text"), str)
-                or not body["text"].strip() or body.get("retrieval_used") is not False
-                or body.get("sources") != [] or body.get("tools_used") != []
+                or not body["text"].strip() or body.get("retrieval_used") is not bool(evidence)
+                or body.get("sources") != expected_sources or body.get("tools_used") != (["web_search"] if evidence else [])
+                or backend not in allowed_backends
+                or (backend == "desktop") != (model == "gemma4:12b-it-qat")
                 or not isinstance(model, str) or model not in accepted
                 or body.get("model_manifest_sha256") != accepted[model]["digest"]):
             raise LocalAIError("The local model returned a mismatched response.")

@@ -131,7 +131,7 @@ class LocalAIUITests(unittest.IsolatedAsyncioTestCase):
   view.service.chat.return_value={'text':answer,'metrics':{'done_reason':'stop'}}
   await view.generate('Explain the tradeoff')
   view.service.chat.assert_awaited_once()
-  self.assertEqual(view.service.chat.await_args.kwargs,{'profile':'conversation'})
+  self.assertEqual(view.service.chat.await_args.kwargs,{'profile':'conversation','evidence':None,'allowed_backends':('server',)})
   first=[call.kwargs['embed'] for call in view.message.edit.await_args_list if call.kwargs.get('embed')][-1]
   pages=[first]+[call.kwargs['embed'] for call in view.message.reply.await_args_list]
   self.assertEqual(''.join(page.description for page in pages),answer)
