@@ -54,6 +54,20 @@ DESKTOP_MODEL = 'gemma4:12b-it-qat'
 DESKTOP_DIGEST = 'sha256:38044be4f923e5a55264ed7df4eaac2676651a905f735197c504045140c02bd3'
 DESKTOP_URL = os.environ.get('DESKTOP_AI_URL', '')
 DESKTOP_TOKEN_FILE = Path(os.environ.get('DESKTOP_AI_TOKEN_FILE', '/run/secrets/desktop_ai_token'))
+DESKTOP_REASONS = frozenset({
+    'desktop_not_configured', 'desktop_offline', 'desktop_auth_failed',
+    'desktop_response_mismatch', 'desktop_unavailable', 'busy',
+    'gpu_monitor_unavailable', 'gpu_monitor_failed', 'gpu_temperature',
+    'host_memory_low', 'gpu_vram_low', 'foreign_gpu_workload',
+})
+
+
+class DesktopUnavailable(RuntimeError):
+    def __init__(self, reason):
+        super().__init__('desktop_unavailable_no_fallback')
+        self.reason = reason if isinstance(reason, str) and reason in DESKTOP_REASONS else 'desktop_unavailable'
+
+
 WEB_SYSTEM = (
     'You are answering with web evidence retrieved by the application. Answer the question '
     'directly, using the supplied sources for current facts. Cite supported factual claims '
@@ -168,7 +182,13 @@ def desktop_status():
         if (status == 200 and body.get('model') == DESKTOP_MODEL
                 and body.get('model_manifest_sha256') == DESKTOP_DIGEST
                 and type(body.get('ready')) is bool and body.get('backend') == 'desktop'):
-            result.update(ready=body['ready'], reason='ready' if body['ready'] else 'desktop_unavailable')
+            reason = body.get('reason')
+            result.update(ready=body['ready'], reason='ready' if body['ready'] else
+                          reason if isinstance(reason, str) and reason in DESKTOP_REASONS else 'desktop_unavailable')
+        elif status in (401, 403):
+            result['reason'] = 'desktop_auth_failed'
+        elif status == 200:
+            result['reason'] = 'desktop_response_mismatch'
     except (OSError, ValueError, http.client.HTTPException):
         pass
     return result
@@ -202,17 +222,25 @@ def route_chat(job, messages, *, profile='structured', evidence=None, allowed_ba
     allowed_backends = allowed_backends if allowed_backends is not None else ['server']
     if job.cancelled.is_set():
         raise RuntimeError('cancelled')
-    if profile == 'conversation' and 'desktop' in allowed_backends and desktop_status()['ready']:
-        # Once POST is attempted, ownership stays here. A disconnect is never retried on server.
-        return forward_desktop(job, messages, evidence)
+    fallback_reason = None
+    if profile == 'conversation' and 'desktop' in allowed_backends:
+        desktop = desktop_status()
+        if desktop['ready']:
+            # Once POST is attempted, ownership stays here. A disconnect is never retried on server.
+            return forward_desktop(job, messages, evidence)
+        reason = desktop.get('reason')
+        fallback_reason = reason if isinstance(reason, str) and reason in DESKTOP_REASONS else 'desktop_unavailable'
     if 'server' not in allowed_backends:
-        raise RuntimeError('desktop_unavailable_no_fallback')
+        raise DesktopUnavailable(fallback_reason)
     ready, reason = guard_state(admission=True)
     if not ready:
         raise RuntimeError(reason)
     if job.cancelled.is_set():
         raise RuntimeError('cancelled')
-    return chat(job, messages, profile=profile, evidence=evidence)
+    result = chat(job, messages, profile=profile, evidence=evidence)
+    if fallback_reason:
+        result = {**result, 'fallback_reason': fallback_reason}
+    return result
 
 
 def cancelled_before_admission(request_id):
@@ -504,7 +532,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send(200, route_chat(job, messages, profile=body.get('profile', 'structured'),
                                      evidence=body.get('evidence'), allowed_backends=body.get('allowed_backends')))
         except RuntimeError as error:
-            self.send(503 if str(error) != 'cancelled' else 409, {'error': str(error), 'request_id': request_id})
+            failure = {'error': str(error), 'request_id': request_id}
+            if isinstance(error, DesktopUnavailable):
+                failure['desktop_reason'] = error.reason
+            self.send(503 if str(error) != 'cancelled' else 409, failure)
         finally:
             with LOCK:
                 ACTIVE = None

@@ -177,10 +177,11 @@ For current prices, sales or news, explicitly enable web search:
 
 ```text
 $ask --web What Nintendo eShop deals are available in the US today?
+$ask --desktop --web What Nintendo eShop deals are available in the US today?
 $ask --web --private Compare these current offers
 ```
 
-Put flags before the question, in either order. Queries are limited to 800
+Put flags before the question, in any order. Queries are limited to 800
 UTF-8 bytes. The bot retrieves up to three sources, then gives their bounded
 text to the local model. The answer has a source card with original links,
 retrieval timestamps and labels identifying search excerpts when full pages
@@ -188,18 +189,25 @@ could not be read. Citation markers such as `[S1]` correspond to those cards.
 If retrieval fails, the bot says so and does not generate an unsourced answer.
 Retrieved text is untrusted evidence and cannot trigger homelab actions.
 
-Follow-ups retain web mode and search the new question again. Only the current
+Follow-ups retain GPU selection and web mode and search the new question again. Only the current
 question goes to search providers, so repeat the topic in questions such as
 "Which of those Nintendo deals is cheapest?" Previous conversation messages
 remain local to the configured model gateway. `--private` controls Discord
 delivery; it does not keep a web search query private from upstream providers.
 Use **Cancel generation** to stop either search or model generation. **New
-topic** clears temporary context; start a fresh `$ask` to change web mode.
+topic** clears temporary context; start a fresh `$ask` to change GPU selection or web mode.
 
-The reply footer identifies the actual model and server or desktop GPU. When
-the optional desktop backend is on, ready and permitted for your account, new
+Use `$ask --desktop <question>` to require the desktop model with no server
+fallback, or `$ask --server <question>` to use only the server. These flags are
+mutually exclusive and combine with `--web` and `--private`. They retain your
+existing permissions and do not turn the desktop on. An unavailable required
+desktop produces an explanation without making a server request.
+
+The reply footer identifies the selected mode and actual model and GPU. With
+neither GPU flag, when the desktop is on, ready and permitted for your account, new
 conversations and follow-ups prefer it. Turning it off or sleeping the desktop
-allows new requests to use the server only if you have server access. An
+allows new automatic requests to use the server only if you have server access;
+the footer explains the fallback. An
 interrupted generation is not silently retried on another GPU. The desktop
 on/off switch does not change anybody's permissions. Automated task
 classification and recommendation ranking retain their separate bounded

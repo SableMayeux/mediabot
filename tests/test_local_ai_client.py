@@ -38,6 +38,24 @@ class SequentialSession(Session):
  def post(self,url,**kwargs):self.calls.append((url,kwargs));return next(self.responses)
 
 class LocalAIClientTests(unittest.IsolatedAsyncioTestCase):
+ async def test_desktop_requirement_failure_explains_actual_resource_reason_without_replay(self):
+  client=self.client({'error':'desktop_unavailable_no_fallback','desktop_reason':'gpu_vram_low'},503)
+  with self.assertRaisesRegex(LocalAIError,'GPU memory.*No server request'):
+   await client.chat(ID,MESSAGES,profile='conversation',allowed_backends=('desktop',))
+  self.assertEqual(len(client.session.calls),1)
+  self.assertEqual(client.session.calls[0][1]['json']['allowed_backends'],['desktop'])
+
+ async def test_fallback_reason_only_accepted_for_permitted_auto_server_response(self):
+  body=answer(profile='conversation',backend='server',fallback_reason='foreign_gpu_workload')
+  client=self.client(body)
+  result=await client.chat(ID,MESSAGES,profile='conversation',allowed_backends=('server','desktop'))
+  self.assertEqual(result['fallback_reason'],'foreign_gpu_workload')
+  for reason in ('private machine details',{},None):
+   with self.subTest(reason=reason),self.assertRaisesRegex(LocalAIError,'fallback reason'):
+    await self.client({**body,'fallback_reason':reason}).chat(ID,MESSAGES,profile='conversation',allowed_backends=('server','desktop'))
+  with self.assertRaisesRegex(LocalAIError,'fallback reason'):
+   await self.client(body).chat(ID,MESSAGES,profile='conversation',allowed_backends=('server',))
+
  def client(self,body=None,status=200,error=None,raw=None):
   result=LocalAIService(base_url=URL);result.session=Session(Response(status,answer() if body is None else body,error,raw));return result
  async def test_complete_chunked_response_and_redirect_boundary(self):

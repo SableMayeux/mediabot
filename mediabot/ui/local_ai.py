@@ -9,11 +9,12 @@ import uuid
 
 import discord
 
-from mediabot.services.local_ai import CONVERSATION_MODELS, MODEL, LocalAIError
+from mediabot.services.local_ai import CONVERSATION_MODELS, DESKTOP_UNAVAILABLE_REASONS, MODEL, LocalAIError
 from mediabot.services.web_search import WebSearchError
 from mediabot.ui.life_workflow import OwnerView
 
 _CURRENT = object()
+BACKEND_LABELS = {"auto": "Automatic GPU selection", "desktop": "Desktop only; no server fallback", "server": "Server only"}
 
 
 def parse_ask_options(question):
@@ -25,13 +26,16 @@ def parse_ask_options(question):
         if token == "--":
             text = parts[1].strip() if len(parts) > 1 else ""
             break
-        if token not in {"--private", "--web"}:
-            raise LocalAIError("Supported options are `--web` and `--private`, before your question. Use `--` to end options.")
+        if token not in {"--private", "--web", "--desktop", "--server"}:
+            raise LocalAIError("Supported options are `--web`, `--private`, and either `--desktop` or `--server`, before your question. Use `--` to end options.")
         if token in flags:
             raise LocalAIError(f"Use `{token}` only once.")
         flags.add(token)
         text = parts[1].strip() if len(parts) > 1 else ""
-    return text, "--private" in flags, "--web" in flags
+    if {"--desktop", "--server"} <= flags:
+        raise LocalAIError("Choose either `--desktop` or `--server`, not both. Omit both for automatic GPU selection.")
+    backend = "desktop" if "--desktop" in flags else "server" if "--server" in flags else "auto"
+    return text, "--private" in flags, "--web" in flags, backend
 
 
 def source_embed(sources):
@@ -81,7 +85,7 @@ def source_embeds(sources):
     return pages
 
 
-def conversation_embeds(prompt, answer="Thinking locally...", *, limit_reached=False, legacy_profile=False, model=MODEL, backend=None, web=False):
+def conversation_embeds(prompt, answer="Thinking locally...", *, limit_reached=False, legacy_profile=False, model=MODEL, backend=None, web=False, backend_preference="auto", fallback_reason=None):
     """Return lossless pages, each sent separately to respect Discord's limits."""
     question = str(prompt).strip()
     text = str(answer)
@@ -100,6 +104,9 @@ def conversation_embeds(prompt, answer="Thinking locally...", *, limit_reached=F
     host = {"server": " Server GPU.", "desktop": " Desktop GPU."}.get(backend, "")
     scope = " Web sources searched; no notes or actions." if web else " No notes or web searched; no tools or actions."
     footer = label + "." + host + scope + " Context expires after 10 minutes; these messages remain."
+    footer += " " + BACKEND_LABELS[backend_preference] + "."
+    if backend == "server" and backend_preference == "auto" and fallback_reason:
+        footer += " Server fallback: " + fallback_description(fallback_reason) + "."
     if legacy_profile:
         footer += " Older gateway response limits are active."
     for embed in embeds:
@@ -109,12 +116,17 @@ def conversation_embeds(prompt, answer="Thinking locally...", *, limit_reached=F
     return embeds
 
 
-def conversation_embed(prompt, answer="Thinking locally...", *, web=False):
+def fallback_description(reason):
+    """Translate reviewed codes without displaying remote diagnostic text."""
+    return DESKTOP_UNAVAILABLE_REASONS.get(reason, "desktop is unavailable") if isinstance(reason, str) else "desktop is unavailable"
+
+
+def conversation_embed(prompt, answer="Thinking locally...", *, web=False, backend_preference="auto"):
     """Single-page placeholder, refusing to silently discard a longer answer."""
-    embeds = conversation_embeds(prompt, answer, model=None, web=False)
+    embeds = conversation_embeds(prompt, answer, model=None, web=False, backend_preference=backend_preference)
     if web:
         embeds[0].title = "Searching the web"
-        embeds[0].set_footer(text="Search in progress. No sources or answer confirmed yet. Only your current question is used as the search query.")
+        embeds[0].set_footer(text="Search in progress. No sources or answer confirmed yet. Only your current question is used as the search query. " + BACKEND_LABELS[backend_preference] + ".")
     if len(embeds) != 1:
         raise ValueError("Use conversation_embeds for a multi-page answer.")
     return embeds[0]
@@ -157,7 +169,9 @@ class FollowupModal(discord.ui.Modal, title="Continue local conversation"):
 
 
 class LocalChatView(OwnerView):
-    def __init__(self, *, private=True, channel_id=None, authorize=None, access_policy=None, web_search=None, web=False, **kwargs):
+    def __init__(self, *, private=True, channel_id=None, authorize=None, access_policy=None, web_search=None, web=False, backend_preference="auto", **kwargs):
+        if backend_preference not in BACKEND_LABELS:
+            raise ValueError("Choose auto, desktop, or server routing.")
         super().__init__(timeout=600, **kwargs)
         self.private = private
         self.channel_id = channel_id
@@ -165,6 +179,7 @@ class LocalChatView(OwnerView):
         self.access_policy = access_policy
         self.web_search = web_search
         self.web = web
+        self.backend_preference = backend_preference
         self.search_task = None
         self.phase = None
         self.history = []
@@ -181,6 +196,10 @@ class LocalChatView(OwnerView):
         backends = tuple(key for key in ("server", "desktop") if allowed.get(key) is True)
         if not backends:
             raise LocalAIError("Your account does not currently have access to an AI backend. Ask the bot owner to review `$admin ai access`.")
+        if self.backend_preference != "auto":
+            if self.backend_preference not in backends:
+                raise LocalAIError(f"{self.backend_preference.capitalize()} AI access is disabled for your account. Ask the bot owner to review `$admin ai access`, or start `$ask` with an allowed backend.")
+            backends = (self.backend_preference,)
         if self.web and allowed.get("web") is not True:
             raise LocalAIError("Web search is disabled for your account. Start `$ask` without `--web` for local chat.")
         return backends
@@ -258,7 +277,7 @@ class LocalChatView(OwnerView):
                     # Archive the previous turn intact, moving only its controls.
                     previous = self.message
                     try:
-                        following = await previous.reply(embed=conversation_embed(prompt, web=self.web), view=self,
+                        following = await previous.reply(embed=conversation_embed(prompt, web=self.web, backend_preference=self.backend_preference), view=self,
                             mention_author=False, allowed_mentions=discord.AllowedMentions.none())
                     except discord.HTTPException:
                         if interaction:
@@ -272,7 +291,7 @@ class LocalChatView(OwnerView):
                         await previous.edit(view=None)
                     except discord.HTTPException:
                         pass  # The old controls are revision-bound and cannot submit.
-                if not await self.edit_response(content=None, embed=conversation_embed(prompt, web=self.web), view=self):
+                if not await self.edit_response(content=None, embed=conversation_embed(prompt, web=self.web, backend_preference=self.backend_preference), view=self):
                     return
                 self.turn_visible = True
             async with self.lock:
@@ -337,7 +356,8 @@ class LocalChatView(OwnerView):
                 pages = conversation_embeds(prompt, result["text"],
                     limit_reached=isinstance(metrics, dict) and metrics.get("done_reason") == "length",
                     legacy_profile=result.get("legacy_profile") is True, model=result.get("model", MODEL),
-                    backend=result.get("backend"), web=self.web)
+                    backend=result.get("backend"), web=self.web,
+                    backend_preference=self.backend_preference, fallback_reason=result.get("fallback_reason"))
                 if not await self.edit_response(content=None, embed=pages[0]):
                     return
                 for page in pages[1:]:

@@ -7,6 +7,20 @@ and this project uses semantic version numbers.
 
 ## [Unreleased]
 
+## [2.8.1] - 2026-09-12
+
+### Fixed
+
+- Add `$ask --desktop` and `$ask --server` to require a particular AI backend.
+  These options combine with web search and private delivery, remain selected
+  for follow-ups, and respect current user permissions. A desktop-only request
+  never silently falls back to the server.
+- Explain why automatic routing used the server when the desktop was unavailable.
+  Preserve bounded readiness reasons for GPU memory, workload, temperature,
+  system memory, connectivity, and authentication in status and failure messages.
+- Show the requested backend mode alongside the actual model and serving GPU,
+  and document selection in server and DM help.
+
 ## [2.8.0] - 2026-09-12
 
 ### Added

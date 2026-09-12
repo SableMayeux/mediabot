@@ -12,6 +12,20 @@ import aiohttp
 
 MODEL = "llama3.2:3b-instruct-q4_K_M"
 MODEL_DIGEST = "sha256:a80c4f17acd55265feec403c7aef86be0c25983ab279d83f3bcd3abbcb5b8b72"
+DESKTOP_UNAVAILABLE_REASONS = {
+    "desktop_not_configured": "desktop connection is not configured",
+    "desktop_offline": "desktop worker could not be reached",
+    "desktop_auth_failed": "desktop authentication failed",
+    "desktop_response_mismatch": "desktop model or protocol did not match",
+    "desktop_unavailable": "desktop worker is not ready",
+    "busy": "desktop worker is handling another request",
+    "gpu_monitor_unavailable": "desktop GPU monitor is unavailable or stale",
+    "gpu_monitor_failed": "desktop GPU monitoring failed",
+    "gpu_temperature": "desktop GPU temperature is too high",
+    "host_memory_low": "desktop system RAM is below its reserve",
+    "gpu_vram_low": "desktop GPU memory is below its reserve",
+    "foreign_gpu_workload": "desktop GPU is busy with another workload",
+}
 CONVERSATION_MODELS = {
     MODEL: {"digest": MODEL_DIGEST, "label": "Llama 3.2 3B"},
     "qwen3.5:4b": {
@@ -149,7 +163,9 @@ class LocalAIService:
                     if code == "request_timeout":
                         raise LocalAIError("Local generation reached its deadline. Try a shorter question.")
                     if code == "desktop_unavailable_no_fallback":
-                        raise LocalAIError("Desktop AI is off, busy, or unavailable. Your account does not have server fallback access.")
+                        reason = body.get("desktop_reason")
+                        detail = DESKTOP_UNAVAILABLE_REASONS.get(reason, "desktop worker is not ready") if isinstance(reason, str) else "desktop worker is not ready"
+                        raise LocalAIError("Desktop AI is unavailable: " + detail + ". Desktop AI was required or no server fallback was permitted. No server request was made. Open MediaBot Desktop AI on the desktop, or check `$admin ai status`.")
                     if code in {"desktop_request_interrupted", "desktop_request_failed", "desktop_response_mismatch"}:
                         raise LocalAIError("Desktop AI did not finish this request. It was not retried on another GPU. Try again when the desktop is available.")
                     if (response.status == 400 and code == "invalid_request"
@@ -223,6 +239,12 @@ class LocalAIService:
             body = await self.request("/v1/chat", {"request_id": request_id, "messages": messages})
         model = body.get("model")
         backend = body.get("backend", "server")
+        if "fallback_reason" in body:
+            reason = body["fallback_reason"]
+            if (not isinstance(reason, str) or reason not in DESKTOP_UNAVAILABLE_REASONS
+                    or backend != "server" or "desktop" not in allowed_backends
+                    or "server" not in allowed_backends or profile != "conversation"):
+                raise LocalAIError("The local model returned a mismatched fallback reason.")
         expected_sources = [{key: value for key, value in source.items() if key != "text"} for source in evidence]
         accepted = CONVERSATION_MODELS if profile == "conversation" and not legacy_profile else {MODEL: CONVERSATION_MODELS[MODEL]}
         if (body.get("request_id") != request_id or not isinstance(body.get("text"), str)

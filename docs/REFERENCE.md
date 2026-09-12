@@ -63,17 +63,24 @@ channel; use a new private conversation for private follow-ups. `$help` works
 in DMs; other household media commands still use the configured server.
 
 `$ask --web <question>` enables bounded web retrieval for that conversation.
-Combine `--web` and `--private` in either order before the question. Only the
+Combine `--web`, `--private` and one optional GPU flag in any order before the question. Only the
 current question is searched, limited to 800 UTF-8 bytes; history is never sent
 as a search query. Up to three source records, totaling at most 6,000 UTF-8
 bytes of extracted text, accompany the local inference. Links, timestamps and
 page-versus-excerpt labels come from retrieval, not model-generated metadata.
 No usable sources means no inference. Cancellation covers retrieval as well as
-generation. Follow-ups retain web mode and repeat retrieval for the new query.
+generation. Follow-ups retain GPU selection and web mode and repeat retrieval for the new query.
 
-Server and desktop inference permissions are independent. The gateway prefers
+`$ask --desktop <question>` requires the desktop and disables server fallback for
+that conversation. `$ask --server <question>` requires the server. The flags are
+mutually exclusive, never grant access and do not enable the desktop switch.
+An unavailable required desktop produces an explanation without a server request.
+Omit both for automatic selection. Start a new `$ask` to change the selection;
+**New topic** clears context while retaining the selection and web mode.
+
+Server and desktop inference permissions are independent. Automatic routing prefers
 an available permitted desktop and falls back only to a permitted server before
-work is accepted. It does not retry ambiguous or interrupted work on another
+work is accepted, reporting the fallback reason in the reply footer. It does not retry ambiguous or interrupted work on another
 backend. `web` permission controls source retrieval separately. Membership and
 effective permissions are rechecked before work and before publishing a result.
 Defaults grant current members server and web access, while desktop access is

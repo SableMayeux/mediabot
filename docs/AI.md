@@ -8,20 +8,29 @@ the desktop on does not grant anyone access to it.
 
 ```text
 $ask explain why RAID 0 needs backups
+$ask --desktop explain the tradeoffs in detail
+$ask --server a quick local question
 $ask --web worthwhile Nintendo eShop deals in the US
+$ask --desktop --web worthwhile Nintendo eShop deals in the US
 $ask --web --private what changed in Home Assistant this month?
 ```
 
 An ordinary server request answers in its original channel. In a DM it answers
 in that DM. `--private` sends the answer to your DM when the command starts in a
-server. Both flags go before the question, in either order.
+server. All flags go before the question, in any order. `--desktop` requires the
+desktop model and never falls back to the server. `--server` uses only the server.
+Choose one or omit both for automatic selection. The flags do not grant access
+or turn the desktop on. If a required desktop is unavailable, the bot reports
+why and makes no server request.
 
 Web answers include source IDs such as `[S1]`, clickable source cards, and the
 retrieval time. Cards distinguish page text from a search-engine excerpt. The
 footer identifies the model and whether the desktop or server GPU answered.
 The original question remains readable, and long answers continue in replies.
 
-The follow-up button retains web mode. Each follow-up searches only its new
+The follow-up button retains GPU selection and web mode. Start a new `$ask` to
+change either; **New topic** clears history while keeping both settings.
+Each web follow-up searches only its new
 question, so include the subject again: "Which of those Nintendo games supports
 local co-op?" is more useful than "Which ones?" The short conversation history
 goes to the local model, not the search engines. Context expires after ten
@@ -61,10 +70,13 @@ and a result is withheld if its required access was revoked during generation.
 Server permission also controls `$recommend --auto`; ordinary provider recommendations remain available.
 These permissions do not grant Life access or change media-account links.
 
-Desktop is preferred when the requester has desktop access and its worker is
-ready. If unavailable, server fallback requires server access. A desktop-only
+With automatic selection, desktop is preferred when the requester has desktop
+access and its worker is ready. If unavailable, server fallback requires server
+access, and the reply footer explains the fallback. A desktop-only
 user receives an availability message instead. Once the desktop accepts a
 request, a disconnect is reported rather than rerunning it on another GPU.
+`$ask --desktop` enforces desktop-only for that conversation even when the
+requester also has server access. It does not change their saved permissions.
 
 ## Desktop switch
 

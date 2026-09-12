@@ -89,6 +89,30 @@ class AIAdminTests(unittest.IsolatedAsyncioTestCase):
         view.generate.assert_awaited_once_with("Current fixture?")
         self.assertIn("800 UTF-8 bytes", app.ask.help)
 
+    async def test_backend_flags_reach_conversation_in_dm_and_server(self):
+        for guild in (None, self.guild):
+            for backend in ("desktop", "server"):
+                ctx = self.context("ask", guild=guild)
+                ctx.reply.return_value = SimpleNamespace(channel=SimpleNamespace(id=700))
+                view = SimpleNamespace(generate=AsyncMock(), stop=Mock())
+                with patch.object(app, "local_ai", SimpleNamespace(enabled=True)), \
+                     patch.object(app, "LocalChatView", return_value=view) as factory:
+                    await app.ask.callback(ctx, question="--web --" + backend + " Current fixture?")
+                self.assertEqual(factory.call_args.kwargs["backend_preference"], backend)
+                self.assertTrue(factory.call_args.kwargs["web"])
+                view.generate.assert_awaited_once_with("Current fixture?")
+                permissions = await factory.call_args.kwargs["access_policy"]()
+                self.assertTrue(permissions["desktop"])
+                self.assertTrue(permissions["server"])
+
+    async def test_conflicting_backend_flags_rejected_before_view(self):
+        ctx = self.context("ask")
+        with patch.object(app, "LocalChatView") as factory:
+            await app.ask.callback(ctx, question="--desktop --server Question")
+        factory.assert_not_called()
+        self.assertIn("Choose either", ctx.reply.await_args.args[0])
+        self.assertIn("no server fallback", app.ask.help)
+
 
 if __name__ == "__main__":
     unittest.main()

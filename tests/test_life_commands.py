@@ -117,6 +117,9 @@ class PrivateLifeCommandTests(unittest.IsolatedAsyncioTestCase):
             await app.mediabot_help.callback(ctx)
         data = str(ctx.reply.call_args.kwargs["embed"].to_dict())
         self.assertIn("$ask", data)
+        self.assertIn("--desktop", data)
+        self.assertIn("--server", data)
+        self.assertIn("no server fallback", data)
         self.assertNotIn("$think", data)
         self.assertNotIn("$life", data)
 
@@ -153,6 +156,10 @@ class PrivateLifeCommandTests(unittest.IsolatedAsyncioTestCase):
         ctx.author.guild_permissions=SimpleNamespace(administrator=True)
         with patch.object(app.bot,'is_owner',AsyncMock(return_value=True)):
             await app.mediabot_help.callback(ctx,topic='all')
+        rendered = str([call.kwargs['embed'].to_dict() for call in ctx.reply.call_args_list])
+        self.assertIn('--desktop', rendered)
+        self.assertIn('--server', rendered)
+        self.assertIn('no server fallback', rendered)
         for call in ctx.reply.call_args_list:
             embed=call.kwargs['embed']
             self.assertLessEqual(len(embed),6000)

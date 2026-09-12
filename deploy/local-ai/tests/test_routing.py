@@ -16,6 +16,37 @@ EVIDENCE = [{'id': 'S1', 'title': 'Example source', 'url': 'https://example.com/
 
 
 class RoutingTests(unittest.TestCase):
+    def test_readiness_retains_only_known_desktop_reasons(self):
+        valid = {'ready': False, 'model': G.DESKTOP_MODEL,
+                 'model_manifest_sha256': G.DESKTOP_DIGEST, 'backend': 'desktop'}
+        for reason in ('gpu_vram_low', 'foreign_gpu_workload', 'busy', 'gpu_monitor_failed'):
+            with self.subTest(reason=reason), patch.object(G, 'DESKTOP_URL', 'https://x.ts.net:8445'), \
+                    patch.object(G, 'desktop_request', return_value=(200, {**valid, 'reason': reason})):
+                self.assertEqual(G.desktop_status()['reason'], reason)
+        for reason in ('sensitive untrusted text', {}, None):
+            with self.subTest(reason=reason), patch.object(G, 'DESKTOP_URL', 'https://x.ts.net:8445'), \
+                    patch.object(G, 'desktop_request', return_value=(200, {**valid, 'reason': reason})):
+                self.assertEqual(G.desktop_status()['reason'], 'desktop_unavailable')
+
+    def test_desktop_auth_and_identity_failures_have_safe_reasons(self):
+        for code, body, expected in ((401, {}, 'desktop_auth_failed'),
+                                      (200, {'ready': True}, 'desktop_response_mismatch')):
+            with self.subTest(code=code), patch.object(G, 'DESKTOP_URL', 'https://x.ts.net:8445'), \
+                    patch.object(G, 'desktop_request', return_value=(code, body)):
+                self.assertEqual(G.desktop_status()['reason'], expected)
+
+    def test_auto_fallback_explains_reason_and_strict_desktop_never_runs_server(self):
+        with patch.object(G, 'desktop_status', return_value={'ready': False, 'reason': 'gpu_vram_low'}), \
+                patch.object(G, 'guard_state', return_value=(True, 'ready')), \
+                patch.object(G, 'chat', return_value={'backend': 'server'}) as server:
+            result = G.route_chat(G.Job(ID), MESSAGES, profile='conversation', allowed_backends=['server', 'desktop'])
+            self.assertEqual(result['fallback_reason'], 'gpu_vram_low')
+            server.reset_mock()
+            with self.assertRaises(G.DesktopUnavailable) as caught:
+                G.route_chat(G.Job(ID), MESSAGES, profile='conversation', allowed_backends=['desktop'])
+            self.assertEqual(caught.exception.reason, 'gpu_vram_low')
+            server.assert_not_called()
+
     def test_cancel_monitor_interrupts_socket_created_after_initial_cancel(self):
         job = G.Job(ID)
         connection = MagicMock()

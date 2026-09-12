@@ -159,7 +159,7 @@ PREFIX = "$"
 OWNER_DM_COMMANDS = frozenset({"think", "life"})
 ADMIN_DM_GUILDS = {}
 
-BOT_VERSION = "2.8.0"
+BOT_VERSION = "2.8.1"
 
 # discord.py normally wraps non-successful API responses in HTTPException, but
 # aiohttp connection failures can escape directly before Discord returns a
@@ -9821,7 +9821,7 @@ async def mediabot_help(
                 description += "\n\nAdministrator access is checked against your selected server on each use. If you administer several, use `$admin server <server ID>`."
             await ctx.reply(description)
             return
-        lines = [f"`{prefix}ask [--web] <question>` - local conversation here in DM; --web retrieves cited sources",
+        lines = [f"`{prefix}ask [--desktop|--server] [--web] <question>` - chat here in DM; select a GPU and optionally retrieve web sources",
                  f"`{prefix}help <command>` - command details"]
         if is_bot_owner:
             lines += [f"`{prefix}think [--auto] <text>` - save your private raw capture; --auto attempts one source-quoted task",
@@ -9836,7 +9836,7 @@ async def mediabot_help(
                           f"`{prefix}admin ai` - backend status and persistent user access"]
         embed = discord.Embed(title="MediaBot in DMs", description="\n".join(lines), color=discord.Color.blurple())
         embed.add_field(name="In the server", value="`$ask` answers in the channel. `$ask --private <question>` moves the answer to a DM. `$recommend --auto` optionally ranks provider suggestions with the local model. Media commands and torrent review currently require the configured server; an account link does not enable them in DMs.", inline=False)
-        embed.add_field(name="AI routing and search", value="Desktop AI is preferred only when it is on and your account has desktop access. Server fallback also requires server access. `--web` searches the current question and shows source links; follow-ups in that conversation search again. `--private` controls Discord delivery, not search-provider privacy.", inline=False)
+        embed.add_field(name="AI routing and search", value="`--desktop` requires the desktop with no server fallback. `--server` uses only the server. Omit both to prefer a ready, permitted desktop with permitted server fallback. Follow-ups keep that selection and web mode. `--web` searches the current question and shows sources. `--private` controls Discord delivery, not search-provider privacy.", inline=False)
         await ctx.reply(embed=embed)
         return
     can_use_torrent = is_bot_owner or is_administrator
@@ -9985,7 +9985,7 @@ async def mediabot_help(
         return
 
     if normalized_topic != "all":
-        embed.add_field(name="Local conversation", value=f"`{prefix}ask <question>` - answer in this channel\n`{prefix}ask --web <question>` - search sources and answer with citations\n`{prefix}ask --web --private <question>` - web answer in DM\nDesktop AI is preferred when on and permitted for your account. Follow-ups retain web mode; only the current question is searched.", inline=False)
+        embed.add_field(name="Local conversation", value=f"`{prefix}ask <question>` - answer here with automatic GPU selection\n`{prefix}ask --desktop <question>` - desktop only, no server fallback\n`{prefix}ask --server <question>` - server only\nAdd `--web` for cited sources or `--private` for DM delivery, before the question. GPU selection never grants access. Follow-ups keep your GPU selection and web mode.", inline=False)
         if is_bot_owner:
             embed.add_field(name="Your private Life workspace", value=f"`{prefix}think [--auto] <text>` - save first; optionally classify one task\n`{prefix}life inbox` / `{prefix}life tasks` - captures, tasks and confirmed actions\nThese commands also work in your DM. Life storage is currently owner-only.", inline=False)
         if is_bot_owner or is_administrator:
@@ -10233,18 +10233,18 @@ async def local_chat_command_allowed(ctx):
     raise commands.CheckFailure("Local chat is available to current members of the configured server and the bot owner.")
 
 
-@bot.command(name="ask", help="Ask the local model here or in DM. Use `$ask --web <question>` to retrieve cited web sources, `$ask --private <question>` for DM delivery, or combine both flags before the question. Web queries are limited to 800 UTF-8 bytes. Follow-ups retain web mode and search only the new question, so include the subject again. Current server membership and AI access are checked each turn. Desktop is preferred when on and permitted; server fallback requires server access. No notes or actions. --private does not hide a --web query from search providers.")
+@bot.command(name="ask", help="Ask the local model here or in DM. Use `$ask --desktop <question>` to require the desktop with no server fallback, or `$ask --server <question>` for server only. Omit both for automatic GPU selection. Add `--web` for cited web sources and `--private` for DM delivery, in any order before the question. Web queries are limited to 800 UTF-8 bytes. Follow-ups retain GPU selection and web mode; only the new question is searched, so include the subject again. Current membership and AI access are checked each turn; selecting a GPU never grants access. Automatic routing prefers a ready permitted desktop; server fallback requires server access. No notes or actions. --private does not hide a --web query from search providers.")
 @commands.check(local_chat_command_allowed)
 @commands.cooldown(2, 30, commands.BucketType.user)
 async def ask(ctx, *, question: str = ""):
     try:
-        question, private_option, web = parse_ask_options(question)
+        question, private_option, web, backend_preference = parse_ask_options(question)
     except LocalAIError as exc:
         await ctx.reply(str(exc))
         return
     private = private_option or ctx.guild is None
     if not question:
-        await ctx.reply("Use `$ask <question>`, `$ask --web <question>` for cited web search, or add `--private` for DM delivery. Web queries go to search providers; your notes are never searched.")
+        await ctx.reply("Use `$ask <question>` for automatic GPU selection, `--desktop` for desktop only, or `--server` for server only. Add `--web` for cited search or `--private` for DM delivery. Put flags before your question. Web queries go to search providers; your notes are never searched.")
         return
     try:
         append_prompt([], question)
@@ -10270,10 +10270,10 @@ async def ask(ctx, *, question: str = ""):
         return await permissions_for(ctx.author)
     view = LocalChatView(bot=bot, service=local_ai, actor_id=ctx.author.id,
         guild_id=None if private else origin_guild_id, private=private, authorize=authorize,
-        access_policy=access_policy, web_search=web_search, web=web)
+        access_policy=access_policy, web_search=web_search, web=web, backend_preference=backend_preference)
     try:
         if private and ctx.guild is not None:
-            view.message = await ctx.author.send(embed=conversation_embed(question, "Opening a private local conversation...", web=web),
+            view.message = await ctx.author.send(embed=conversation_embed(question, "Opening a private local conversation...", web=web, backend_preference=backend_preference),
                 allowed_mentions=discord.AllowedMentions.none())
         else:
             view.message = await ctx.reply("Opening a local conversation...", view=view, mention_author=False)
@@ -12726,6 +12726,7 @@ async def admin_ai(ctx):
         "Overrides apply to that person across this bot and persist through restarts and desktop switching. "
         "Defaults: server and web allowed for current server members; desktop owner-only. "
         "The owner always retains access. Desktop-only users do not fall back to the server. "
+        "Use `$ask --desktop <question>` to require desktop AI without server fallback, or `--server` for server only. "
         "Use the DesktopAI shortcuts on the desktop to turn its GPU backend on or off."
     )
 
@@ -12798,7 +12799,7 @@ async def admin_ai_status(ctx):
         reason = discord.utils.escape_mentions(str(value.get("reason", "not configured or unavailable")))[:300]
         embed.add_field(name=backend.capitalize(), value=f"{'Ready' if value.get('ready') is True else 'Unavailable'}\nModel: {model}\n{reason}", inline=False)
     embed.add_field(name="Web search", value="Configured; each search reports its own result or failure." if web_search.enabled else "Not configured.", inline=False)
-    embed.add_field(name="How routing works", value="Desktop is preferred only when ready and permitted for that user. Server fallback requires server access. Desktop switching does not change permissions. Use the DesktopAI shortcuts on the desktop to turn it on or off.", inline=False)
+    embed.add_field(name="How routing works", value="`$ask --desktop <question>` requires desktop AI without server fallback. `--server` uses server AI only. Without either flag, a ready permitted desktop is preferred. Server fallback requires server access. Selection and desktop switching do not grant permissions. Use the DesktopAI shortcut on the desktop to turn it on or off.", inline=False)
     await ctx.reply(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 

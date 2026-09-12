@@ -1,11 +1,12 @@
 import asyncio
+import itertools
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock
 
 from mediabot.services.local_ai import LocalAIError
 from mediabot.services.web_search import WebSearchError
-from mediabot.ui.local_ai import LocalChatView, parse_ask_options, source_embed, source_embeds
+from mediabot.ui.local_ai import LocalChatView, conversation_embeds, parse_ask_options, source_embed, source_embeds
 
 
 SOURCE = {"id": "S1", "title": "Example evidence", "url": "https://example.com/source",
@@ -13,13 +14,13 @@ SOURCE = {"id": "S1", "title": "Example evidence", "url": "https://example.com/s
 
 
 class WebAIUITests(unittest.IsolatedAsyncioTestCase):
-    def view(self, *, web=True):
+    def view(self, *, web=True, backend_preference="auto"):
         view = LocalChatView(bot=SimpleNamespace(is_owner=AsyncMock(return_value=True)),
             service=SimpleNamespace(chat=AsyncMock(return_value={"text": "Answer [S1]", "backend": "server"}),
                                     cancel=AsyncMock()),
             web_search=SimpleNamespace(enabled=True, search=AsyncMock(return_value=[dict(SOURCE)])),
             web=web, access_policy=AsyncMock(return_value={"server": True, "desktop": False, "web": True}),
-            actor_id=42, guild_id=None)
+            actor_id=42, guild_id=None, backend_preference=backend_preference)
         view.message = SimpleNamespace(guild=None, edit=AsyncMock(), reply=AsyncMock())
         self.addCleanup(view.stop)
         return view
@@ -31,12 +32,98 @@ class WebAIUITests(unittest.IsolatedAsyncioTestCase):
 
     def test_flags_are_order_independent_and_preserve_literal_question(self):
         for value in ("--web --private Question", "--private --web Question"):
-            self.assertEqual(parse_ask_options(value), ("Question", True, True))
-        self.assertEqual(parse_ask_options("Ask about --web flags"), ("Ask about --web flags", False, False))
-        self.assertEqual(parse_ask_options("-- --web is literal"), ("--web is literal", False, False))
-        for value in ("--foo Question", "--web --web Question"):
+            self.assertEqual(parse_ask_options(value), ("Question", True, True, "auto"))
+        self.assertEqual(parse_ask_options("Ask about --web flags"), ("Ask about --web flags", False, False, "auto"))
+        self.assertEqual(parse_ask_options("-- --web is literal"), ("--web is literal", False, False, "auto"))
+        for backend in ("desktop", "server"):
+            for options in itertools.permutations(("--web", "--private", "--" + backend)):
+                self.assertEqual(parse_ask_options(" ".join(options) + " Question"), ("Question", True, True, backend))
+            self.assertEqual(parse_ask_options("--" + backend + " -- --server literal"),
+                             ("--server literal", False, False, backend))
+        for value in ("--foo Question", "--web --web Question", "--desktop --desktop Question",
+                      "--server --server Question", "--desktop --web --server Question", "--server --desktop Question"):
             with self.assertRaises(LocalAIError):
                 parse_ask_options(value)
+
+    async def test_forced_backend_uses_singleton_despite_access_to_both_and_shows_selection(self):
+        for backend, model in (("desktop", "gemma4:12b-it-qat"), ("server", "llama3.2:3b-instruct-q4_K_M")):
+            view = self.view(backend_preference=backend)
+            view.access_policy.return_value = {"desktop": True, "server": True, "web": True}
+            view.service.chat.return_value = {"text": "Selected answer", "backend": backend, "model": model}
+            await view.generate("Question")
+            self.assertEqual(view.service.chat.await_args.kwargs["allowed_backends"], (backend,))
+            cards = [call.kwargs["embed"] for call in view.message.edit.await_args_list if call.kwargs.get("embed")]
+            self.assertTrue(all(backend.capitalize() + " only" in card.footer.text for card in cards))
+            self.assertIn(backend.capitalize() + " GPU", cards[-1].footer.text)
+
+    async def test_forced_backend_does_not_grant_permission_or_search(self):
+        for backend in ("desktop", "server"):
+            view = self.view(backend_preference=backend)
+            view.access_policy.return_value = {"desktop": True, "server": True, "web": True, backend: False}
+            await view.generate("Denied question")
+            view.web_search.search.assert_not_awaited()
+            view.service.chat.assert_not_awaited()
+            self.assertEqual(view.history, [])
+            card = [call.kwargs["embed"] for call in view.message.edit.await_args_list if call.kwargs.get("embed")][-1]
+            self.assertIn(backend.capitalize() + " AI access is disabled", card.description)
+
+    async def test_forced_desktop_permission_revoked_during_search_never_falls_back(self):
+        view = self.view(backend_preference="desktop")
+        view.access_policy.side_effect = [{"desktop": True, "server": True, "web": True},
+                                         {"desktop": False, "server": True, "web": True}]
+        await view.generate("Search question")
+        view.web_search.search.assert_awaited_once()
+        view.service.chat.assert_not_awaited()
+
+    async def test_forced_desktop_late_revocation_withholds_answer_despite_server_permission(self):
+        view = self.view(web=False, backend_preference="desktop")
+        view.access_policy.side_effect = [{"desktop": True, "server": True}, {"desktop": False, "server": True}]
+        view.service.chat.return_value = {"text": "Must not publish", "backend": "desktop", "model": "gemma4:12b-it-qat"}
+        await view.generate("Question")
+        self.assertEqual(view.service.chat.await_args.kwargs["allowed_backends"], ("desktop",))
+        self.assertEqual(view.history, [])
+        self.assertFalse(any(call.kwargs.get("embed") and call.kwargs["embed"].description == "Must not publish"
+                             for call in view.message.edit.await_args_list))
+
+    async def test_forced_desktop_refuses_unexpected_server_answer(self):
+        view = self.view(web=False, backend_preference="desktop")
+        view.access_policy.return_value = {"desktop": True, "server": True}
+        view.service.chat.return_value = {"text": "Wrong backend", "backend": "server"}
+        await view.generate("Question")
+        self.assertEqual(view.history, [])
+        self.assertFalse(any(call.kwargs.get("embed") and call.kwargs["embed"].description == "Wrong backend"
+                             for call in view.message.edit.await_args_list))
+
+    async def test_followup_retains_forced_desktop_and_history(self):
+        view = self.view(web=False, backend_preference="desktop")
+        view.access_policy.return_value = {"desktop": True, "server": True}
+        view.service.chat.return_value = {"text": "Desktop answer", "backend": "desktop", "model": "gemma4:12b-it-qat"}
+        following = SimpleNamespace(guild=None, edit=AsyncMock(), reply=AsyncMock())
+        view.message.reply.return_value = following
+        await view.generate("Original question")
+        await view.generate("Followup question")
+        self.assertEqual(view.service.chat.await_count, 2)
+        self.assertTrue(all(call.kwargs["allowed_backends"] == ("desktop",) for call in view.service.chat.await_args_list))
+        self.assertEqual(view.service.chat.await_args.args[1][0]["content"], "Original question")
+        self.assertIs(view.message, following)
+
+    async def test_default_routing_still_allows_both_permitted_backends(self):
+        view = self.view(web=False)
+        view.access_policy.return_value = {"desktop": True, "server": True}
+        await view.generate("Automatic question")
+        self.assertEqual(view.service.chat.await_args.kwargs["allowed_backends"], ("server", "desktop"))
+
+    def test_fallback_footer_uses_controlled_reason_and_never_raw_remote_text(self):
+        fallback = conversation_embeds("Question", "Answer", backend="server", fallback_reason="gpu_vram_low")[0]
+        self.assertIn("Server fallback:", fallback.footer.text)
+        self.assertNotIn("gpu_vram_low", fallback.footer.text)
+        malicious = "@everyone secret remote diagnostic"
+        fallback = conversation_embeds("Question", "Answer", backend="server", fallback_reason=malicious)[0]
+        self.assertNotIn(malicious, fallback.footer.text)
+        for backend, selection in (("desktop", "desktop"), ("server", "server")):
+            card = conversation_embeds("Question", "Answer", backend=backend, backend_preference=selection,
+                                       fallback_reason="desktop_offline")[0]
+            self.assertNotIn("Server fallback:", card.footer.text)
 
     async def test_searches_only_current_question_and_shows_verified_sources_and_backend(self):
         view = self.view()
