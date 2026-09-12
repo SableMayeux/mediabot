@@ -2,9 +2,30 @@
 from __future__ import annotations
 
 from mediabot.core import database
+from mediabot.services.local_ai import LocalAIError
 
 CAPABILITIES = ("server", "desktop", "web")
 DEFAULTS = {"server": True, "desktop": False, "web": True}
+
+
+class PermissionBoundServerAI:
+    """Recheck a user's server capability around a structured model request."""
+    def __init__(self, model, authorize):
+        self.model = model
+        self.authorize = authorize
+
+    @property
+    def enabled(self):
+        return self.model.enabled
+
+    async def chat(self, request_id, messages):
+        if await self.authorize() is not True:
+            raise LocalAIError("Server AI access is no longer available; standard ranking retained.")
+        result = await self.model.chat(request_id, messages,
+            profile="structured", allowed_backends=("server",))
+        if await self.authorize() is not True:
+            raise LocalAIError("Server AI access changed during generation; standard ranking retained.")
+        return result
 
 
 def _identity(value):

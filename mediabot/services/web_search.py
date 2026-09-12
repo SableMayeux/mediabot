@@ -184,62 +184,67 @@ def extract_text(raw):
 
 
 def select_excerpt(text, query, budget=MAX_TEXT_BYTES // MAX_SOURCES):
-    """Choose verbatim passages near query terms, rather than only a page's prefix."""
-    if len(text.encode("utf-8")) <= budget:
+    """Keep at most two contiguous passages, preserving neighboring product/context lines."""
+    raw = text.encode("utf-8")
+    if len(raw) <= budget:
         return text
     ignored = {"a", "an", "and", "any", "are", "can", "do", "for", "from", "get", "how",
                "in", "is", "it", "me", "of", "on", "or", "some", "the", "this", "to",
                "was", "what", "when", "where", "which", "who", "with", "would", "you"}
     terms = {word for word in re.findall(r"\w{2,}", query.casefold()) if word not in ignored}
-    # Bounded paragraph spans retain source order and sentence context.
+    # Rank bounded paragraph anchors. Repeated boilerplate such as "Nintendo
+    # Switch" gets less weight than terms occurring in only a few paragraphs.
     spans = []
-    for paragraph in re.finditer(r"[^\n]+", text):
+    for paragraph in re.finditer(rb"[^\n]+", raw):
         start, end = paragraph.span()
-        while end - start > 800:
-            cut = text.rfind(" ", start + 400, start + 800)
-            cut = cut if cut > start else start + 800
+        while end - start > 600:
+            cut = raw.rfind(b" ", start + 300, start + 600)
+            cut = cut if cut > start else start + 600
             spans.append((start, cut))
             start = cut + 1
         if start < end:
             spans.append((start, end))
-    ranked = []
-    for index, (start, end) in enumerate(spans):
-        words = set(re.findall(r"\w{2,}", text[start:end].casefold()))
-        score = len(terms & words)
-        if score:
-            ranked.append((-score, index))
+    matches = [terms & set(re.findall(r"\w{2,}", raw[start:end].decode("utf-8", errors="ignore").casefold()))
+               for start, end in spans]
+    frequency = {term: sum(term in words for words in matches) for term in terms}
+    ranked = sorted((-sum(1 / frequency[term] ** .5 for term in words), index)
+                    for index, words in enumerate(matches) if words)
     if not ranked:
         return clip_utf8(text, budget)
-    selected = set()
-    used = 0
-    # Include the strongest passages first, then adjacent context if room remains.
-    for _, index in sorted(ranked):
-        start, end = spans[index]
-        cost = len(text[start:end].encode("utf-8")) + 7
-        if used + cost <= budget:
-            selected.add(index)
-            used += cost
-    for index in sorted(tuple(selected)):
-        for neighbor in (index - 1, index + 1):
-            if neighbor < 0 or neighbor >= len(spans) or neighbor in selected:
-                continue
-            start, end = spans[neighbor]
-            cost = len(text[start:end].encode("utf-8")) + 7
-            if used + cost <= budget:
-                selected.add(neighbor)
-                used += cost
-    if not selected:
-        start, end = spans[min(ranked)[1]]
-        return clip_utf8(text[start:end], budget)
-    parts = []
-    previous = None
-    for index in sorted(selected):
-        if parts:
-            parts.append("\n" if previous == index - 1 else "\n[...]\n")
-        start, end = spans[index]
-        parts.append(text[start:end])
-        previous = index
-    return clip_utf8("".join(parts), budget)
+    passage_budget = (budget - len("\n[...]\n")) // 2
+    selected = []
+    for _, index in ranked:
+        anchor_start, anchor_end = spans[index]
+        # Keep preceding titles/labels as well as following prices/qualifiers.
+        start = max(0, anchor_start - min(240, passage_budget // 3))
+        preceding_break = raw.rfind(b"\n", max(0, start - 120), start)
+        if preceding_break >= 0:
+            start = preceding_break + 1
+        end = min(len(raw), start + passage_budget)
+        if end < anchor_end:
+            start, end = max(0, anchor_end - passage_budget), anchor_end
+        if end < len(raw):
+            last_break = raw.rfind(b"\n", max(anchor_end, end - 140), end)
+            if last_break < 0:
+                last_break = raw.rfind(b" ", max(anchor_end, end - 80), end)
+            if last_break >= 0:
+                end = last_break
+        if any(start < other_end and end > other_start for other_start, other_end in selected):
+            continue
+        selected.append((start, end))
+        if len(selected) == 2:
+            break
+    if len(selected) == 1:
+        # A single relevant passage can use the full allowance with no discontinuity.
+        start, end = selected[0]
+        end = min(len(raw), start + budget)
+        if end < len(raw):
+            last_break = raw.rfind(b"\n", max(selected[0][1], end - 140), end)
+            if last_break >= 0:
+                end = last_break
+        selected = [(start, end)]
+    return "\n[...]\n".join(raw[start:end].decode("utf-8", errors="ignore").strip()
+                           for start, end in sorted(selected))
 
 
 async def _read_bounded(response, limit):

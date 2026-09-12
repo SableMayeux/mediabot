@@ -243,6 +243,20 @@ class WebSearchTests(unittest.IsolatedAsyncioTestCase):
             source = await service._source({"url": "https://example.com", "title": "<script>invisible</script>"})
         self.assertEqual(source["title"], "example.com")
 
+    def test_product_cards_keep_title_publisher_platform_price_and_region_together(self):
+        intro = ("Best Nintendo Switch eShop deals\n"
+                 "Prices come from the US and European stores; confirm your region.\n")
+        cards = "\n".join("-90%\nGame Title " + str(i) + "\nPublisher " + str(i)
+                          + "\nNintendo Switch\n$29.99 $2.99" for i in range(60))
+        footer = "\nDiscounts are regional. Confirm the Nintendo US eShop price before buying."
+        excerpt = select_excerpt(intro + cards + footer, "Any current Nintendo US eShop deals?")
+        self.assertLessEqual(len(excerpt.encode()), 2000)
+        self.assertLessEqual(excerpt.count("[...]"), 1)
+        self.assertIn("US and European stores", excerpt)
+        self.assertIn("Game Title 0\nPublisher 0\nNintendo Switch\n$29.99 $2.99", excerpt)
+        # Repeated platform matches must not crowd out all product names.
+        self.assertLessEqual(excerpt.count("Nintendo Switch") - excerpt.count("Game Title"), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

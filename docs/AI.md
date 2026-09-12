@@ -58,6 +58,7 @@ The owner retains all three capabilities. Overrides persist in MediaBot's
 existing database, independently of desktop power, sleep, and bot restarts.
 Current server membership remains required. Follow-ups recheck permissions,
 and a result is withheld if its required access was revoked during generation.
+Server permission also controls `$recommend --auto`; ordinary provider recommendations remain available.
 These permissions do not grant Life access or change media-account links.
 
 Desktop is preferred when the requester has desktop access and its worker is

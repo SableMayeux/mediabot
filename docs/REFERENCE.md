@@ -80,7 +80,10 @@ Defaults grant current members server and web access, while desktop access is
 owner-only. Per-user overrides live in the existing database's additive
 `ai_access` table, apply across this bot's allowed servers and survive backend
 switches and restarts. Owner access cannot be revoked. These controls do not
-change Life, task classification or recommendation permissions.
+change Life or owner-only task classification. Server AI permission also gates
+`$recommend --auto`, with fresh checks before inference and before accepting its
+ranking. Late revocation preserves standard provider ranking; ordinary
+`$recommend` remains available without AI permission.
 
 `$admin` and its subcommands also work in DMs. The caller must currently be an
 administrator of an allowlisted server; the bot owner's status alone does not

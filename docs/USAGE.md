@@ -203,7 +203,9 @@ allows new requests to use the server only if you have server access. An
 interrupted generation is not silently retried on another GPU. The desktop
 on/off switch does not change anybody's permissions. Automated task
 classification and recommendation ranking retain their separate bounded
-server profile and existing checks.
+server profile and existing checks. `$recommend --auto` requires server AI
+permission; ordinary `$recommend` still works without it. A late revocation
+keeps the standard provider ranking and discards the model's ranking.
 
 ### Owner controls for AI access
 

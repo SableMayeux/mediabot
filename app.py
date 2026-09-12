@@ -76,7 +76,7 @@ from mediabot.services.life_capture import LifeCaptureError, LifeCaptureService
 from mediabot.services.life_workflow import LifeWorkflowService
 from mediabot.ui.life_workflow import LifeLauncher
 from mediabot.services.local_ai import LocalAIService
-from mediabot.services.ai_access import AIAccessService, CAPABILITIES
+from mediabot.services.ai_access import AIAccessService, CAPABILITIES, PermissionBoundServerAI
 from mediabot.services.web_search import WebSearchService
 from mediabot.services.chat_access import allowed_chat_user
 from mediabot.ui.local_ai import LocalChatView, append_prompt, conversation_embed, parse_ask_options
@@ -10869,12 +10869,17 @@ async def configured_taste_user(ctx):
         "`&&`/`||`, and parentheses. "
         "Add --auto for optional local ranking of up to six provider candidates, "
         "with provider-sourced explanations and standard ranking on failure. "
+        "--auto requires current server membership and server AI permission. Ordinary recommendations work without AI permission. "
         "Usage: $recommend [movie|show] [expression] "
         "[--count N] [--top N] [--random | --auto]"
     ),
 )
 async def recommend_media(ctx, *, filters: str = ""):
     filtered, automatic = extract_auto_option(filters)
+    async def server_ai_allowed():
+        if not await allowed_chat_user(bot, ctx.author, ALLOWED_GUILD_IDS, guild_id=getattr(ctx.guild, "id", None)):
+            return False
+        return ai_access.access(ctx.author.id, owner=await bot.is_owner(ctx.author))["server"]["allowed"]
     normalized = " ".join(filtered.split())
     if (
         str(ctx.invoked_with).casefold() in {"randomrequest", "rr"}
@@ -10889,6 +10894,9 @@ async def recommend_media(ctx, *, filters: str = ""):
             return
         if options.randomize:
             await ctx.reply("Choose `$recommend --auto` for local model ranking or `--random` for random sampling. These modes cannot be combined.")
+            return
+        if not await server_ai_allowed():
+            await ctx.reply("`$recommend --auto` requires current server membership and server AI access. Use ordinary `$recommend` for provider recommendations, or ask the bot owner to review `$admin ai access`.")
             return
     local_ratings = ratings_for_user(ctx.author.id)
     jellyfin_items = []
@@ -10954,7 +10962,7 @@ async def recommend_media(ctx, *, filters: str = ""):
                 trakt_items=trakt_items,
                 trakt_ratings=trakt_ratings,
                 trakt_available=trakt_available,
-                **({'ai_model': local_ai} if automatic else {}),
+                **({'ai_model': PermissionBoundServerAI(local_ai, server_ai_allowed)} if automatic else {}),
             )
 
             if batch:
