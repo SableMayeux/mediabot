@@ -7,21 +7,43 @@ import uuid
 
 import discord
 
-from mediabot.services.local_ai import LocalAIError
+from mediabot.services.local_ai import CONVERSATION_MODELS, MODEL, LocalAIError
 from mediabot.ui.life_workflow import OwnerView
 
 _CURRENT = object()
 
 
-def conversation_embed(prompt, answer="Thinking locally..."):
-    # Keep every question, including private questions, inside Discord's limits.
+def conversation_embeds(prompt, answer="Thinking locally...", *, limit_reached=False, legacy_profile=False, model=MODEL):
+    """Return lossless pages, each sent separately to respect Discord's limits."""
     question = str(prompt).strip()
-    embed = discord.Embed(title="Local conversation", description=answer[:min(3900, 5600 - len(question))])
+    text = str(answer)
+    first_limit = min(3900, 5600 - len(question))
+    if first_limit < 1:
+        raise ValueError("Question exceeds the conversation display limit.")
+    pages = [text[:first_limit]]
+    pages.extend(text[index:index + 3900] for index in range(first_limit, len(text), 3900))
+    embeds = [discord.Embed(title="Local conversation" if index == 0 else "Local conversation continued",
+                            description=page) for index, page in enumerate(pages)]
     for index in range(0, len(question), 1000):
-        embed.add_field(name="Question" if index == 0 else "Question continued",
-                        value=question[index:index + 1000], inline=False)
-    embed.set_footer(text="Llama 3.2 3B. No notes or web searched; no tools or actions. Context expires after 10 minutes; these messages remain.")
-    return embed
+        embeds[0].add_field(name="Question" if index == 0 else "Question continued",
+                           value=question[index:index + 1000], inline=False)
+    label = CONVERSATION_MODELS[model]["label"] if model is not None else "Local model"
+    footer = label + ". No notes or web searched; no tools or actions. Context expires after 10 minutes; these messages remain."
+    if legacy_profile:
+        footer += " Older gateway response limits are active."
+    for embed in embeds:
+        embed.set_footer(text=footer)
+    if limit_reached:
+        embeds[-1].set_footer(text=footer + " Output limit reached; ask a follow-up to continue.")
+    return embeds
+
+
+def conversation_embed(prompt, answer="Thinking locally..."):
+    """Single-page placeholder, refusing to silently discard a longer answer."""
+    embeds = conversation_embeds(prompt, answer, model=None)
+    if len(embeds) != 1:
+        raise ValueError("Use conversation_embeds for a multi-page answer.")
+    return embeds[0]
 
 
 def append_prompt(history, prompt):
@@ -160,7 +182,7 @@ class LocalChatView(OwnerView):
             async with self.lock:
                 if not self.current(identity):
                     return
-            result = await self.service.chat(identity, messages)
+            result = await self.service.chat(identity, messages, profile="conversation")
             async with self.lock:
                 if not self.current(identity):
                     return
@@ -168,7 +190,19 @@ class LocalChatView(OwnerView):
                     await self.edit_response(content="Response discarded after cancellation.")
                     return
                 self.history = messages + [{"role": "assistant", "content": result["text"]}]
-                await self.edit_response(content=None, embed=conversation_embed(prompt, result["text"]))
+                metrics = result.get("metrics")
+                pages = conversation_embeds(prompt, result["text"],
+                    limit_reached=isinstance(metrics, dict) and metrics.get("done_reason") == "length",
+                    legacy_profile=result.get("legacy_profile") is True, model=result.get("model", MODEL))
+                if not await self.edit_response(content=None, embed=pages[0]):
+                    return
+                for page in pages[1:]:
+                    try:
+                        await self.message.reply(embed=page, mention_author=False,
+                            allowed_mentions=discord.AllowedMentions.none())
+                    except discord.HTTPException:
+                        await self.edit_response(content="I could not deliver the rest of this answer. The displayed answer is incomplete; try a follow-up.")
+                        break
         except LocalAIError as exc:
             async with self.lock:
                 if self.current(identity):

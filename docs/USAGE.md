@@ -166,6 +166,18 @@ commands or change tasks. Follow-up controls retain the previous messages.
 Context expires after ten minutes; Discord's messages do not. This is not
 persistent model memory.
 
+With an updated conversation gateway, answers have room for explanations and
+examples, up to 1,024 generated tokens. The footer identifies the model actually
+used and indicates when generation hit its limit. Long replies retain the full
+answer instead of silently cutting it off; continuation replies are used when
+the answer and question exceed Discord's embed limit. The original question
+stays visible. A legacy gateway still works, with its older limits identified.
+
+Current prices, sales and news still need a current source. This chat has no
+web-search tool. A different model can improve reasoning, but cannot verify a
+live Nintendo sale from its training data. Automated task classification and
+recommendation ranking use their separate bounded profile and existing checks.
+
 Life is currently an **owner-only integration**, not a shared task service for
 every member. With its separately provisioned gateway:
 

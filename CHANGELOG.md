@@ -7,6 +7,29 @@ and this project uses semantic version numbers.
 
 ## [Unreleased]
 
+## [2.7.2] - 2026-09-12
+
+### Changed
+
+- Give `$ask` an explicit conversation profile with a larger response budget
+  and room for useful explanations. Task classification and recommendation
+  ranking retain their existing structured profile and source validation.
+- Support the approved Qwen 3.5 4B model identity for conversation responses,
+  alongside the existing Llama identity, with exact manifest verification and
+  an accurate model label. A separately updated gateway selects the model;
+  installing MediaBot does not download or switch model weights.
+- Allow a longer client deadline for conversation requests. Older gateways
+  remain compatible through a definitive pre-inference rejection fallback;
+  timeouts and ambiguous failures are never blindly retried.
+
+### Fixed
+
+- Preserve complete long answers using bounded continuation replies instead
+  of silently slicing the response. Keep the original question and existing
+  requester-bound follow-up/cancellation controls.
+- Identify generation-limit and legacy-gateway responses in the conversation
+  footer so a short or incomplete answer is not presented as unlimited output.
+
 ## [2.7.1] - 2026-09-11
 
 ### Added

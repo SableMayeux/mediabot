@@ -12,10 +12,21 @@ import aiohttp
 
 MODEL = "llama3.2:3b-instruct-q4_K_M"
 MODEL_DIGEST = "sha256:a80c4f17acd55265feec403c7aef86be0c25983ab279d83f3bcd3abbcb5b8b72"
+CONVERSATION_MODELS = {
+    MODEL: {"digest": MODEL_DIGEST, "label": "Llama 3.2 3B"},
+    "qwen3.5:4b": {
+        "digest": "sha256:2a654d98e6fba55d452b7043684e9b57a947e393bbffa62485a7aac05ee4eefd",
+        "label": "Qwen 3.5 4B",
+    },
+}
 
 
 class LocalAIError(RuntimeError):
     pass
+
+
+class _ConversationProfileUnsupported(LocalAIError):
+    """A legacy gateway definitively rejected the new field before inference."""
 
 
 def validate_endpoint(value):
@@ -84,7 +95,10 @@ class LocalAIService:
             raise LocalAIError("Unsupported local model request.")
         await self.start()
         try:
-            async with self.session.post(self.base_url + route, json=payload, allow_redirects=False) as response:
+            options = {"json": payload, "allow_redirects": False}
+            if payload.get("profile") == "conversation":
+                options["timeout"] = aiohttp.ClientTimeout(total=135)
+            async with self.session.post(self.base_url + route, **options) as response:
                 raw = bytearray()
                 async for chunk in response.content.iter_chunked(8192):
                     raw.extend(chunk)
@@ -107,6 +121,9 @@ class LocalAIService:
                         raise LocalAIError("The local model's GPU safety monitor is unavailable. Try again after it recovers.")
                     if code == "request_timeout":
                         raise LocalAIError("Local generation reached its deadline. Try a shorter question.")
+                    if (response.status == 400 and code == "invalid_request"
+                            and payload.get("profile") == "conversation"):
+                        raise _ConversationProfileUnsupported("The gateway uses the older generation protocol.")
                     if response.status == 400:
                         raise LocalAIError("Keep the conversation under 3000 UTF-8 bytes. Start a new question for a longer topic.")
                     raise LocalAIError("The local model is unavailable. No task or calendar action was taken.")
@@ -116,8 +133,10 @@ class LocalAIService:
             raise LocalAIError("The local model did not finish. It cannot change tasks or calendar events.") from exc
         return body
 
-    async def chat(self, request_id, messages):
+    async def chat(self, request_id, messages, *, profile="structured"):
         validate_identity(request_id)
+        if profile not in ("structured", "conversation"):
+            raise LocalAIError("Unsupported generation profile.")
         if (not isinstance(messages, list) or not 1 <= len(messages) <= 12
                 or any(not isinstance(m, dict) or set(m) != {"role", "content"}
                        or m["role"] not in ("user", "assistant") or not isinstance(m["content"], str) for m in messages)
@@ -125,12 +144,30 @@ class LocalAIService:
             raise LocalAIError("Invalid conversation.")
         if sum(len(m["content"].encode("utf-8")) for m in messages) > 3000:
             raise LocalAIError("Keep the conversation under 3000 UTF-8 bytes.")
-        body = await self.request("/v1/chat", {"request_id": request_id, "messages": messages})
+        payload = {"request_id": request_id, "messages": messages}
+        legacy_profile = False
+        if profile == "conversation":
+            payload["profile"] = profile
+        try:
+            body = await self.request("/v1/chat", payload)
+        except _ConversationProfileUnsupported:
+            # A definite 400 means the legacy gateway did not admit this request.
+            # Never retry a timeout, disconnect, resource failure, or ambiguous result.
+            legacy_profile = True
+            body = await self.request("/v1/chat", {"request_id": request_id, "messages": messages})
+        model = body.get("model")
+        accepted = CONVERSATION_MODELS if profile == "conversation" and not legacy_profile else {MODEL: CONVERSATION_MODELS[MODEL]}
         if (body.get("request_id") != request_id or not isinstance(body.get("text"), str)
                 or not body["text"].strip() or body.get("retrieval_used") is not False
                 or body.get("sources") != [] or body.get("tools_used") != []
-                or body.get("model") != MODEL or body.get("model_manifest_sha256") != MODEL_DIGEST):
+                or not isinstance(model, str) or model not in accepted
+                or body.get("model_manifest_sha256") != accepted[model]["digest"]):
             raise LocalAIError("The local model returned a mismatched response.")
+        if (profile == "conversation" and not legacy_profile and body.get("profile") != "conversation"
+                or "profile" in body and body["profile"] != ("structured" if legacy_profile else profile)):
+            raise LocalAIError("The local model returned a mismatched generation profile.")
+        if legacy_profile:
+            body = {**body, "legacy_profile": True}
         return body
 
     async def cancel(self, request_id):

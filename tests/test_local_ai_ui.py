@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock
 
-from mediabot.ui.local_ai import FollowupModal, LocalChatView, append_prompt, conversation_embed
+from mediabot.ui.local_ai import FollowupModal, LocalChatView, append_prompt, conversation_embed, conversation_embeds
 
 
 def interaction(user=42,guild=None):
@@ -36,7 +36,7 @@ class LocalAIUITests(unittest.IsolatedAsyncioTestCase):
   self.assertTrue(any(call.kwargs.get('embed') and call.kwargs['embed'].description=='Synthetic answer' for call in edits))
  async def test_timeout_discards_late_answer_and_never_repopulates_history(self):
   view=self.view();started=asyncio.Event();release=asyncio.Event()
-  async def answer(*args):started.set();await release.wait();return {'text':'Late private response'}
+  async def answer(*args,**kwargs):started.set();await release.wait();return {'text':'Late private response'}
   view.service.chat.side_effect=answer
   task=asyncio.create_task(view.generate('Private question'));await started.wait()
   identity=view.active_request
@@ -71,7 +71,7 @@ class LocalAIUITests(unittest.IsolatedAsyncioTestCase):
   self.assertNotIn('Second user text',str(first.history))
  async def test_overlapping_generations_submit_once(self):
   view=self.view();started=asyncio.Event();release=asyncio.Event()
-  async def answer(*args):started.set();await release.wait();return {'text':'First response'}
+  async def answer(*args,**kwargs):started.set();await release.wait();return {'text':'First response'}
   view.service.chat.side_effect=answer
   first=asyncio.create_task(view.generate('First'));await started.wait()
   event=interaction();await view.generate('Second',event)
@@ -79,7 +79,7 @@ class LocalAIUITests(unittest.IsolatedAsyncioTestCase):
   release.set();await first
  async def test_requested_cancel_discards_even_a_late_success_response(self):
   view=self.view();started=asyncio.Event();release=asyncio.Event()
-  async def answer(*args):started.set();await release.wait();return {'text':'Should not appear'}
+  async def answer(*args,**kwargs):started.set();await release.wait();return {'text':'Should not appear'}
   view.service.chat.side_effect=answer
   task=asyncio.create_task(view.generate('Question'));await started.wait()
   identity=view.active_request;event=interaction();await view.cancel(event)
@@ -117,12 +117,69 @@ class LocalAIUITests(unittest.IsolatedAsyncioTestCase):
  async def test_full_private_question_and_embed_limit(self):
   prompt='a'*2990+' last words'
   prompt=prompt[:3000]
-  embed=conversation_embed(prompt,'b'*3900)
+  embeds=conversation_embeds(prompt,'b'*3900);embed=embeds[0]
   self.assertEqual(''.join(f.value for f in embed.fields),prompt)
-  self.assertLessEqual(len(embed),6000)
+  self.assertEqual(''.join(page.description for page in embeds),'b'*3900)
+  self.assertTrue(all(len(page)<=6000 for page in embeds))
   view=self.view();await view.generate(prompt)
   final=[c.kwargs['embed'] for c in view.message.edit.await_args_list if c.kwargs.get('embed')][-1]
   self.assertEqual(''.join(f.value for f in final.fields),prompt)
+
+ async def test_long_answer_is_delivered_losslessly_without_mentions_and_keeps_controls(self):
+  view=self.view();view.message.reply=AsyncMock()
+  answer='Opening explanation.\n'+('Detailed evidence and reasoning. '*350)+'\nFinal conclusion.'
+  view.service.chat.return_value={'text':answer,'metrics':{'done_reason':'stop'}}
+  await view.generate('Explain the tradeoff')
+  view.service.chat.assert_awaited_once()
+  self.assertEqual(view.service.chat.await_args.kwargs,{'profile':'conversation'})
+  first=[call.kwargs['embed'] for call in view.message.edit.await_args_list if call.kwargs.get('embed')][-1]
+  pages=[first]+[call.kwargs['embed'] for call in view.message.reply.await_args_list]
+  self.assertEqual(''.join(page.description for page in pages),answer)
+  self.assertTrue(all(len(page)<=6000 and len(page.description)<=4096 for page in pages))
+  self.assertEqual(first.fields[0].value,'Explain the tradeoff')
+  self.assertTrue(all(not page.fields for page in pages[1:]))
+  self.assertTrue(all(call.kwargs['allowed_mentions'].everyone is False and call.kwargs['mention_author'] is False for call in view.message.reply.await_args_list))
+  self.assertIs(view.message.edit.await_args.kwargs['view'],view)
+  self.assertEqual(view.history[-1]['content'],answer)
+
+ async def test_output_limit_is_visible_on_last_page_and_legacy_limits_are_disclosed(self):
+  pages=conversation_embeds('Question','x'*9000,limit_reached=True,legacy_profile=True)
+  self.assertIn('Output limit reached',pages[-1].footer.text)
+  self.assertNotIn('Output limit reached',pages[0].footer.text)
+  self.assertTrue(all('Older gateway response limits' in page.footer.text for page in pages))
+  view=self.view();view.service.chat.return_value={'text':'Generated portion','metrics':{'done_reason':'length'}}
+  await view.generate('Question')
+  page=[call.kwargs['embed'] for call in view.message.edit.await_args_list if call.kwargs.get('embed')][-1]
+  self.assertIn('Output limit reached',page.footer.text)
+
+ async def test_display_uses_actual_approved_response_model(self):
+  view=self.view();view.service.chat.return_value={'text':'Answer','model':'qwen3.5:4b'}
+  await view.generate('Question')
+  page=[call.kwargs['embed'] for call in view.message.edit.await_args_list if call.kwargs.get('embed')][-1]
+  self.assertTrue(page.footer.text.startswith('Qwen 3.5 4B.'))
+  self.assertNotIn('Llama',page.footer.text)
+  self.assertTrue(conversation_embed('Question').footer.text.startswith('Local model.'))
+
+ async def test_malformed_optional_metrics_do_not_break_answer_delivery(self):
+  for metrics in (None,[], 'unexpected', 42):
+   view=self.view();view.service.chat.return_value={'text':'Answer','metrics':metrics}
+   await view.generate('Question')
+   page=[call.kwargs['embed'] for call in view.message.edit.await_args_list if call.kwargs.get('embed')][-1]
+   self.assertEqual(page.description,'Answer')
+   self.assertNotIn('Output limit reached',page.footer.text)
+
+ async def test_failed_continuation_delivery_is_explicit_and_does_not_regenerate(self):
+  import discord
+  view=self.view();view.message.reply=AsyncMock(side_effect=discord.Forbidden(SimpleNamespace(status=403,reason='Forbidden'),'closed'))
+  view.service.chat.return_value={'text':'x'*8000}
+  await view.generate('Question')
+  view.service.chat.assert_awaited_once()
+  self.assertTrue(any('displayed answer is incomplete' in (call.kwargs.get('content') or '') for call in view.message.edit.await_args_list))
+  self.assertIsNone(view.active_request)
+
+ def test_single_page_helper_rejects_silent_truncation(self):
+  with self.assertRaisesRegex(ValueError,'multi-page'):
+   conversation_embed('Question','x'*5000)
 
  async def test_followups_preserve_previous_question_and_answer(self):
   view=self.view();old=view.message

@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 import uuid
 
-from mediabot.services.local_ai import LocalAIError, LocalAIService, MODEL, MODEL_DIGEST
+from mediabot.services.local_ai import CONVERSATION_MODELS, LocalAIError, LocalAIService, MODEL, MODEL_DIGEST
 
 URL='http://local-ai-gateway:8080'
 ID='12345678-1234-4abc-8def-123456789abc'
@@ -32,6 +32,10 @@ class Session:
  closed=False
  def __init__(self,response):self.response=response;self.calls=[];self.close=AsyncMock()
  def post(self,url,**kwargs):self.calls.append((url,kwargs));return self.response
+
+class SequentialSession(Session):
+ def __init__(self,*responses):super().__init__(None);self.responses=iter(responses)
+ def post(self,url,**kwargs):self.calls.append((url,kwargs));return next(self.responses)
 
 class LocalAIClientTests(unittest.IsolatedAsyncioTestCase):
  def client(self,body=None,status=200,error=None,raw=None):
@@ -96,5 +100,54 @@ class LocalAIClientTests(unittest.IsolatedAsyncioTestCase):
     factory.assert_called_once();self.assertFalse(factory.call_args.kwargs['trust_env'])
     self.assertEqual(factory.call_args.kwargs['timeout'].total,70)
    await client.close();session.close.assert_awaited_once()
+
+ async def test_conversation_uses_fixed_profile_and_longer_deadline(self):
+  client=self.client(answer(profile='conversation'))
+  await client.chat(ID,MESSAGES,profile='conversation')
+  options=client.session.calls[0][1]
+  self.assertEqual(options['json'],{'request_id':ID,'messages':MESSAGES,'profile':'conversation'})
+  self.assertEqual(options['timeout'].total,135)
+  self.assertFalse(options['allow_redirects'])
+
+ async def test_structured_default_keeps_legacy_wire_contract(self):
+  client=self.client()
+  await client.chat(ID,MESSAGES)
+  options=client.session.calls[0][1]
+  self.assertEqual(options['json'],{'request_id':ID,'messages':MESSAGES})
+  self.assertNotIn('timeout',options)
+
+ async def test_only_definite_legacy_profile_rejection_retries_once(self):
+  client=self.client();client.session=SequentialSession(Response(400,{'error':'invalid_request'}),Response(200,answer()))
+  result=await client.chat(ID,MESSAGES,profile='conversation')
+  self.assertTrue(result['legacy_profile'])
+  first,second=[options for url,options in client.session.calls]
+  self.assertEqual(first['json']['profile'],'conversation')
+  self.assertEqual(second['json'],{'request_id':ID,'messages':MESSAGES})
+  self.assertNotIn('timeout',second)
+  client=self.client();client.session=SequentialSession(Response(400,{'error':'invalid_request'}),Response(400,{'error':'invalid_request'}))
+  with self.assertRaises(LocalAIError):await client.chat(ID,MESSAGES,profile='conversation')
+  self.assertEqual(len(client.session.calls),2)
+
+ async def test_conversation_failures_never_trigger_ambiguous_retry(self):
+  for status,code in ((400,'different_error'),(429,'busy'),(503,'request_timeout'),(503,'foreign_gpu_workload'),(401,'unauthorized')):
+   client=self.client({'error':code},status)
+   with self.subTest(status=status,code=code),self.assertRaises(LocalAIError):
+    await client.chat(ID,MESSAGES,profile='conversation')
+   self.assertEqual(len(client.session.calls),1)
+  client=self.client(error=asyncio.TimeoutError())
+  with self.assertRaises(LocalAIError):await client.chat(ID,MESSAGES,profile='conversation')
+  self.assertEqual(len(client.session.calls),1)
+
+ async def test_conversation_model_registry_is_pinned_and_structured_stays_llama(self):
+  qwen=answer(profile='conversation',model='qwen3.5:4b',model_manifest_sha256=CONVERSATION_MODELS['qwen3.5:4b']['digest'])
+  self.assertEqual((await self.client(qwen).chat(ID,MESSAGES,profile='conversation'))['model'],'qwen3.5:4b')
+  for body,profile in ((qwen,'structured'),({**qwen,'model_manifest_sha256':'changed'},'conversation'),({**qwen,'model':'unknown'},'conversation'),(answer(profile='structured'),'conversation'),(answer(),'conversation'),(answer(model=[]),'structured')):
+   with self.subTest(body=body,profile=profile),self.assertRaises(LocalAIError):
+    await self.client(body).chat(ID,MESSAGES,profile=profile)
+  for invalid in ('unbounded',None,{},[]):
+   client=self.client()
+   with self.subTest(invalid=invalid),self.assertRaises(LocalAIError):
+    await client.chat(ID,MESSAGES,profile=invalid)
+   self.assertFalse(client.session.calls)
 
 if __name__=='__main__':unittest.main()
