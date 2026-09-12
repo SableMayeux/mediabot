@@ -76,6 +76,14 @@ class HomelabBoundaryTests(unittest.TestCase):
         document = [{"Name": "/mediabot", "Mounts": mounts,
                      "NetworkSettings": {"Networks": {name: {} for name in GATEWAY_NETWORKS.values()}}}]
         validate_container(document)
+        prior = copy.deepcopy(document)
+        del prior[0]["NetworkSettings"]["Networks"]["mediabot_search_frontend"]
+        validate_container(prior, upgrading=True)
+        with self.assertRaises(DeploymentBoundaryError):
+            validate_container(prior)
+        del prior[0]["NetworkSettings"]["Networks"]["life_intake"]
+        with self.assertRaises(DeploymentBoundaryError):
+            validate_container(prior, upgrading=True)
         wrong = copy.deepcopy(document)
         wrong[0]["Mounts"][0]["Type"] = "volume"
         with self.assertRaises(DeploymentBoundaryError):

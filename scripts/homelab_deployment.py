@@ -61,7 +61,7 @@ def validate_compose(document, version):
             "Private capture storage changed")
 
 
-def validate_container(document):
+def validate_container(document, *, upgrading=False):
     require(isinstance(document, list) and len(document) == 1, "Expected one existing container")
     container = document[0]
     require(container.get("Name") == "/mediabot", "Unexpected live container")
@@ -75,7 +75,10 @@ def validate_container(document):
         require(mount.get("Type") == "bind" and mount.get("Source") == source
                 and mount.get("RW") is False, "Live gateway secret mount changed")
     networks = set(container.get("NetworkSettings", {}).get("Networks", {}))
-    require(set(GATEWAY_NETWORKS.values()) <= networks, "Live gateway network membership changed")
+    required_networks = set(GATEWAY_NETWORKS.values())
+    if upgrading:
+        required_networks.discard("mediabot_search_frontend")
+    require(required_networks <= networks, "Live gateway network membership changed")
     require(not networks.intersection({"local-ai_private", "nextcloud_backend", "nextcloud_frontend"}),
             "Live container reaches a private backend network")
 
@@ -84,6 +87,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kind", choices=("compose", "container"), required=True)
     parser.add_argument("--version")
+    parser.add_argument("--upgrading", action="store_true", help="Accept the prior live network layout before upgrading")
     args = parser.parse_args()
     try:
         document = json.load(sys.stdin)
@@ -91,7 +95,7 @@ def main():
             require(bool(args.version), "Release version is required")
             validate_compose(document, args.version)
         else:
-            validate_container(document)
+            validate_container(document, upgrading=args.upgrading)
     except (DeploymentBoundaryError, ValueError, TypeError, KeyError, IndexError) as exc:
         detail = str(exc) if isinstance(exc, DeploymentBoundaryError) else "Invalid deployment metadata"
         print("Homelab deployment rejected: " + detail, file=sys.stderr)

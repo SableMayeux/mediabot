@@ -463,7 +463,7 @@ done
 docker info >/dev/null 2>&1 || die "Docker daemon is unavailable."
 docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is unavailable."
 docker inspect "$container" >/dev/null 2>&1 || die "Live MediaBot container is missing."
-docker inspect "$container" | python "$stage/scripts/homelab_deployment.py" --kind container
+docker inspect "$container" | python "$stage/scripts/homelab_deployment.py" --kind container --upgrading
 (cd "$target" && docker compose --project-directory "$target" --env-file "$target/.env" \
     -f "$homelab_compose" config --format json) \
     | python "$stage/scripts/homelab_deployment.py" --kind compose --version "$release_version"
