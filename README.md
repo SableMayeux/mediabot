@@ -4,7 +4,7 @@
 MediaBot connects your server to your existing media stack, with search cards,
 confirmation buttons, account-linked requests and progress receipts.
 
-Current source version: **2.8.1**. Get stable source releases and change notes from
+Current source version: **2.8.2**. Get stable source releases and change notes from
 [Releases](https://github.com/SableMayeux/mediabot/releases).
 
 ```text

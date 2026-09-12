@@ -7,6 +7,24 @@ and this project uses semantic version numbers.
 
 ## [Unreleased]
 
+## [2.8.2] - 2026-09-12
+
+### Fixed
+
+- Read public HTML documents up to 2 MiB. Modern storefront pages previously
+  exceeded the 256 KiB cutoff and were replaced with short search snippets.
+- Examine up to eight search results, rank relevant readable evidence, remove
+  duplicate text, and diversify sources before choosing three final excerpts.
+- Follow up to two relevant same-site detail links through the existing public
+  DNS and redirect checks, with four concurrent page fetches and a 40-second
+  search deadline. The final evidence budget and GPU resource guards remain.
+- Preserve complete repeated offer cards, including prices and expiry text,
+  instead of joining partial product listings across excerpt gaps. Shopping
+  lookups can recognize product links from their nearby price context.
+- Focus web answers on concrete findings, keep location at the relevant level,
+  and distinguish aggregator reports, upcoming offers, and incomplete evidence.
+  Supply the current UTC date independently of quoted page content.
+
 ## [2.8.1] - 2026-09-12
 
 ### Fixed

@@ -5,9 +5,10 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from mediabot.services.web_search import (
-    MAX_PAGE_BYTES, MAX_TEXT_BYTES, PageUnavailable, UnsafeDestination,
+    MAX_CHILD_PAGES, MAX_PAGE_BYTES, MAX_TEXT_BYTES, PageUnavailable, UnsafeDestination,
     WebSearchError, WebSearchService, _PinnedResolver, _read_bounded,
-    _resolve_public, extract_text, select_excerpt, validate_public_url,
+    _resolve_public, child_results, extract_document, extract_text, query_terms,
+    select_excerpt, select_sources, validate_public_url,
 )
 
 URL = "http://web-search:8080"
@@ -166,11 +167,11 @@ class WebSearchTests(unittest.IsolatedAsyncioTestCase):
         service = self.service()
         result = {"url": "https://example.com", "title": "Example", "content": "Provider snippet."}
         with patch("mediabot.services.web_search._resolve_public", AsyncMock(return_value=PUBLIC)), \
-                patch.object(service, "_fetch_page", AsyncMock(side_effect=PageUnavailable("blocked"))):
+                patch.object(service, "_fetch_document", AsyncMock(side_effect=PageUnavailable("blocked"))):
             source = await service._source(result)
         self.assertEqual((source["kind"], source["text"]), ("snippet", "Provider snippet."))
         with patch("mediabot.services.web_search._resolve_public", AsyncMock(return_value=PUBLIC)), \
-                patch.object(service, "_fetch_page", AsyncMock(side_effect=UnsafeDestination("rebound"))):
+                patch.object(service, "_fetch_document", AsyncMock(side_effect=UnsafeDestination("rebound"))):
             self.assertIsNone(await service._source(result))
         with patch("mediabot.services.web_search._resolve_public", AsyncMock(side_effect=UnsafeDestination("private"))):
             self.assertIsNone(await service._source(result))
@@ -179,7 +180,8 @@ class WebSearchTests(unittest.IsolatedAsyncioTestCase):
         rows = [{"url": "https://example.com/" + str(i), "title": "Title", "content": "Snippet"} for i in range(8)]
         service = self.service({"results": rows})
         with patch("mediabot.services.web_search._resolve_public", AsyncMock(return_value=PUBLIC)), \
-                patch.object(service, "_fetch_page", AsyncMock(side_effect=lambda url: ("\u00e9" * 3000, url))):
+                patch.object(service, "_fetch_document", AsyncMock(side_effect=lambda url: {
+                    "text": chr(256 + int(url.rsplit("/", 1)[1])) * 3000, "url": url, "links": []})):
             sources = await service.search("  original question  ")
         self.assertEqual([s["id"] for s in sources], ["S1", "S2", "S3"])
         self.assertEqual(sum(len(s["text"].encode()) for s in sources), MAX_TEXT_BYTES)
@@ -191,7 +193,8 @@ class WebSearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(options["allow_redirects"])
         service = self.service({"results": [rows[0], rows[0], {**rows[0], "url": rows[0]["url"] + "#part"}]})
         with patch("mediabot.services.web_search._resolve_public", AsyncMock(return_value=PUBLIC)), \
-                patch.object(service, "_fetch_page", AsyncMock(return_value=("Text", rows[0]["url"]))) as fetch:
+                patch.object(service, "_fetch_document", AsyncMock(return_value={
+                    "text": "Text", "url": rows[0]["url"], "links": []})) as fetch:
             self.assertEqual(len(await service.search("question")), 1)
         fetch.assert_awaited_once()
 
@@ -239,7 +242,8 @@ class WebSearchTests(unittest.IsolatedAsyncioTestCase):
     async def test_empty_stripped_title_falls_back_to_public_hostname(self):
         service = self.service()
         with patch("mediabot.services.web_search._resolve_public", AsyncMock(return_value=PUBLIC)), \
-                patch.object(service, "_fetch_page", AsyncMock(return_value=("Source text", "https://example.com/"))):
+                patch.object(service, "_fetch_document", AsyncMock(return_value={
+                    "text": "Source text", "url": "https://example.com/", "links": []})):
             source = await service._source({"url": "https://example.com", "title": "<script>invisible</script>"})
         self.assertEqual(source["title"], "example.com")
 
@@ -256,6 +260,153 @@ class WebSearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Game Title 0\nPublisher 0\nNintendo Switch\n$29.99 $2.99", excerpt)
         # Repeated platform matches must not crowd out all product names.
         self.assertLessEqual(excerpt.count("Nintendo Switch") - excerpt.count("Game Title"), 2)
+
+    async def test_large_realistic_html_keeps_late_answer_and_links(self):
+        # Modern storefront bundles can exceed 256 KiB before the visible body.
+        raw = ("<head><script>" + "var unused = 1;" * 50000 + "</script></head>"
+               "<main><h1>Current camera deals</h1><article>"
+               "Example Camera: USD 499, previously USD 699. Offer ends September 30."
+               "<a href='/deals/cameras'><span>Camera</span> deals</a>"
+               "</article></main>").encode()
+        self.assertGreater(len(raw), 262144)
+        service = self.service()
+        session = Session(Response(raw=raw, headers={"Content-Type": "text/html", "Content-Length": str(len(raw))}))
+        with patch("mediabot.services.web_search._resolve_public", AsyncMock(return_value=PUBLIC)), \
+                patch("mediabot.services.web_search.aiohttp.ClientSession", return_value=session):
+            document = await service._fetch_document("https://shop.example/")
+        self.assertIn("Example Camera: USD 499, previously USD 699", document["text"])
+        self.assertNotIn("var unused", document["text"])
+        self.assertEqual(document["links"], [{"href": "/deals/cameras", "text": "Camera deals", "context": ""}])
+
+    def test_ranking_retains_detail_page_over_duplicate_portals_and_snippets(self):
+        def source(url, text, kind="page"):
+            return {"url": url, "title": "Camera deals", "text": text, "kind": kind}
+        portal = "See our camera deals and check the latest offers in your region. " * 5
+        first = source("https://shop.example/", portal)
+        duplicate = source("https://shop.example/offers", portal + " ")
+        snippet = source("https://shop.example/catalog", "See camera deals and offers.", "snippet")
+        detail = source("https://prices.example/camera", "Example Camera\nWas $699, now $499\nUS offer ends September 30.")
+        independent = source("https://maker.example/camera", "Example Camera uses a 24 megapixel sensor.")
+        selected = select_sources([first, duplicate, snippet, detail, independent], "Any current camera deals?")
+        self.assertEqual(selected[0], detail)
+        self.assertIn(independent, selected)
+        self.assertEqual(sum(item["text"].strip() == portal.strip() for item in selected), 1)
+        self.assertNotIn(snippet, selected)
+
+    def test_child_links_keep_relevant_public_same_host_pages_only_and_bound_count(self):
+        text, links = extract_document("""<nav><a href='/deals/nav'>Camera deals navigation</a></nav>
+            <main><a href='/deals/cameras'>Camera deals</a>
+            <a href='https://evil.example/deals'>Camera deals</a>
+            <a href='http://127.0.0.1/deals'>Camera deals</a>
+            <a href='/login?next=/deals'>Camera deals login</a>
+            <a href='/deals/image.jpg'>Camera deals image</a>
+            <a href='#fragment'>Camera deals</a>
+            <a href='/deals/lenses'>Lens deals</a>
+            <a href='/deals/cameras#another'>Camera deals</a>
+            <a href='/deals/accessories'>Accessory deals</a></main>""")
+        seed = {"url": "https://shop.example/", "text": text, "kind": "page", "_links": links}
+        children = child_results([seed], "Any camera deals?", {seed["url"]})
+        self.assertEqual(len(children), MAX_CHILD_PAGES)
+        self.assertEqual([item["url"] for item in children], [
+            "https://shop.example/deals/cameras", "https://shop.example/deals/lenses"])
+
+    async def test_search_drills_down_once_and_uses_child_answer(self):
+        service = self.service({"results": [{"url": "https://shop.example/", "title": "Camera deals"}]})
+        async def document(url):
+            if url == "https://shop.example/":
+                return {"url": url, "text": "Browse the latest camera deals.", "links": [
+                    {"href": "/deals/cameras", "text": "Camera deals"},
+                    {"href": "/deals/lenses", "text": "Lens deals"},
+                    {"href": "/deals/accessories", "text": "Accessory deals"}]}
+            return {"url": url, "text": "Example Camera\nWas $699, now $499\nUS offer ends September 30.",
+                    "links": [{"href": "/deals/recursive", "text": "More camera deals"}]}
+        with patch("mediabot.services.web_search._resolve_public", AsyncMock(return_value=PUBLIC)), \
+                patch.object(service, "_fetch_document", AsyncMock(side_effect=document)) as fetch:
+            sources = await service.search("Any camera deals?")
+        self.assertEqual(fetch.await_count, 1 + MAX_CHILD_PAGES)
+        self.assertNotIn("https://shop.example/deals/recursive", [call.args[0] for call in fetch.await_args_list])
+        self.assertIn("now $499", sources[0]["text"])
+        self.assertEqual(sources[0]["url"], "https://shop.example/deals/cameras")
+        self.assertTrue(all(set(source) == {"id", "url", "title", "text", "kind", "retrieved_at"} for source in sources))
+
+    async def test_child_dns_rebinding_is_rejected_before_child_fetch(self):
+        service = self.service({"results": [{"url": "https://shop.example/", "title": "Camera deals"}]})
+        document = {"url": "https://shop.example/", "text": "Browse camera deals.", "links": [
+            {"href": "/deals/cameras", "text": "Camera deals"}]}
+        with patch("mediabot.services.web_search._resolve_public", AsyncMock(side_effect=[PUBLIC, UnsafeDestination("private")])) as resolver, \
+                patch.object(service, "_fetch_document", AsyncMock(return_value=document)) as fetch:
+            sources = await service.search("Camera deals")
+        self.assertEqual(resolver.await_count, 2)
+        fetch.assert_awaited_once()
+        self.assertEqual([source["url"] for source in sources], ["https://shop.example/"])
+
+    async def test_eight_results_have_four_page_slots_and_cancel_all_fetches(self):
+        rows = [{"url": "https://example.com/" + str(i), "title": "Answer"} for i in range(12)]
+        service = self.service({"results": rows})
+        started = asyncio.Event()
+        active = maximum = cancelled = 0
+        async def fetch(url):
+            nonlocal active, maximum, cancelled
+            active += 1
+            maximum = max(maximum, active)
+            if active == 4:
+                started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancelled += 1
+                raise
+            finally:
+                active -= 1
+        with patch("mediabot.services.web_search._resolve_public", AsyncMock(return_value=PUBLIC)), \
+                patch.object(service, "_fetch_document", AsyncMock(side_effect=fetch)) as calls:
+            task = asyncio.create_task(service.search("question"))
+            await asyncio.wait_for(started.wait(), timeout=1)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertEqual((maximum, active, cancelled, calls.await_count), (4, 0, 4, 4))
+
+    def test_conversational_filler_does_not_outrank_subject_or_region(self):
+        terms = query_terms("Could you check and see if there are camera deals on their site, if necessary drill down to US locale 80205?")
+        self.assertEqual(terms, {"camera", "deals", "us", "80205"})
+
+    def test_shopping_drilldown_prefers_product_with_adjacent_discount_over_navigation(self):
+        text, links = extract_document("""<main><a href='/hottest'>Hottest camera deals</a>
+            <article><a href='/items/camera-a'>Example Camera A</a>
+            <div>$699</div><div>$499</div><div>-28%</div><div>Sale ends September 30</div></article>
+            <article><a href='/items/camera-b'>Example Camera B</a>
+            <div>$999</div><div>$799</div><div>-20%</div></article>
+            <a href='/unrelated'>Unrelated page</a></main>""")
+        seed = {"url": "https://shop.example/", "text": text, "kind": "page", "_links": links}
+        children = child_results([seed], "Any camera deals?", {seed["url"]})
+        self.assertEqual([item["url"] for item in children], [
+            "https://shop.example/items/camera-a", "https://shop.example/items/camera-b"])
+        self.assertNotIn("$699", links[0]["context"])
+        self.assertNotIn("$999", links[1]["context"])
+        self.assertEqual(child_results([seed], "What optics technology exists?", {seed["url"]}), [])
+
+    def test_catalog_discount_first_excerpt_never_leaves_orphaned_title_or_price(self):
+        intro = "Camera sale prices include US and European stores. Check the listed region.\n"
+        cards = ["-90%\nExample Camera " + str(i) + "\nMaker " + str(i)
+                 + "\nDigital camera\n$999.00 $99.90" for i in range(40)]
+        excerpt = select_excerpt(intro + "\n".join(cards), "Any camera deals in US?", budget=700)
+        self.assertTrue(excerpt.startswith(intro))
+        self.assertEqual(excerpt.count("Example Camera"), excerpt.count("$999.00 $99.90"))
+        self.assertEqual(excerpt.count("-90%"), excerpt.count("Example Camera"))
+        self.assertEqual(excerpt.count("[...]"), 1)
+        self.assertTrue(excerpt.endswith("$999.00 $99.90\n[...]"))
+        self.assertLessEqual(len(excerpt.encode("utf-8")), 700)
+
+    def test_catalog_discount_after_prices_keeps_expiry_with_complete_product(self):
+        intro = "US digital shop offers, confirm retailer and region.\n"
+        cards = ["Example Camera " + str(i) + "\n$699.00\n$499.00\n-28%\nLowest recorded price\nSale ends September 30"
+                 for i in range(30)]
+        excerpt = select_excerpt(intro + "\n".join(cards), "Any camera deals?", budget=700)
+        self.assertEqual(excerpt.count("Example Camera"), excerpt.count("$499.00"))
+        self.assertEqual(excerpt.count("Example Camera"), excerpt.count("Sale ends September 30"))
+        self.assertTrue(excerpt.endswith("Sale ends September 30\n[...]"))
+        self.assertLessEqual(len(excerpt.encode("utf-8")), 700)
 
 
 if __name__ == "__main__":

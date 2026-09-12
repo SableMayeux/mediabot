@@ -40,7 +40,13 @@ minutes; Discord messages remain. Cancel covers both search and generation.
 to upstream search engines and retrieves public pages. It does not search Life
 notes, files, Discord channels, or Home Assistant, and it cannot execute actions.
 Sources can be incomplete or wrong. Citations make an answer checkable, not
-guaranteed correct. JavaScript-only sites may provide only search excerpts.
+guaranteed correct. Search now examines up to eight results, ranks readable and
+relevant evidence, removes near-duplicates, and can follow two relevant links
+one level deeper on the same sites. It accepts documents up to 2 MiB, while the
+final model evidence stays bounded to three excerpts and 6,000 UTF-8 bytes.
+JavaScript-only catalogs may still omit product data from the retrieved HTML.
+An aggregator's price is not automatically a verified price in your region or
+at a particular retailer; the answer should identify that distinction.
 
 ## Choose who can use each capability
 

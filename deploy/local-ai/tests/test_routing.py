@@ -16,6 +16,21 @@ EVIDENCE = [{'id': 'S1', 'title': 'Example source', 'url': 'https://example.com/
 
 
 class RoutingTests(unittest.TestCase):
+    def test_web_clock_is_trusted_context_and_evidence_stays_quoted(self):
+        connection = MagicMock()
+        response = connection.getresponse.return_value
+        response.status = 200
+        response.__iter__.return_value = iter([json.dumps({'message': {'content': 'Answer'}, 'done': True}).encode()])
+        with patch.object(G.http.client, 'HTTPConnection', return_value=connection), \
+                patch.object(G, 'guard_state', return_value=(True, 'ready')), \
+                patch.object(G.time, 'strftime', return_value='2026-09-12'):
+            G.chat(G.Job(ID), MESSAGES, profile='conversation', evidence=EVIDENCE)
+        request = next(call for call in connection.request.call_args_list if call.args[1] == '/api/chat')
+        sent = json.loads(request.args[2])['messages']
+        self.assertTrue(sent[0]['content'].endswith('Current date (UTC): 2026-09-12.'))
+        self.assertEqual([message['role'] for message in sent], ['system', 'user', 'user'])
+        self.assertIn('Quoted web evidence', sent[1]['content'])
+
     def test_readiness_retains_only_known_desktop_reasons(self):
         valid = {'ready': False, 'model': G.DESKTOP_MODEL,
                  'model_manifest_sha256': G.DESKTOP_DIGEST, 'backend': 'desktop'}
