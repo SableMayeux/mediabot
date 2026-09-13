@@ -28,9 +28,11 @@ def source():
 def worker():
     result = gateway.Worker.__new__(gateway.Worker)
     result.lock = threading.Lock()
+    result.runtime_lock = threading.Lock()
     result.stop = threading.Event()
     result.cancel = threading.Event()
     result.active, result.leases, result.loaded = None, {}, False
+    result.runtime, result.last_failure, result.interrupt_reason = None, None, "cancelled"
     result.sample = {"sampled": time.monotonic(), "free_mib": 12000, "ram_free_mib": 12000,
                      "temperature_c": 45, "utilization_percent": 2}
     result.stop_runtime = Mock()
@@ -38,6 +40,130 @@ def worker():
 
 
 class DesktopGatewayTests(unittest.TestCase):
+    def monitor_once(self, value):
+        with patch.object(value.stop, "is_set", side_effect=[False, True]), patch.object(value.stop, "wait"):
+            value.monitor()
+
+    def test_cold_runtime_can_start_while_status_port_is_not_listening(self):
+        value = worker()
+        owned = Mock()
+        owned.alive.return_value = True
+        with TemporaryDirectory() as directory:
+            value.root = Path(directory)
+            value.config = {"ollama_exe": str(value.root / "ollama.exe"), "models_path": directory}
+            def api(path):
+                if path == "/api/ps":
+                    raise ConnectionRefusedError("startup port not listening")
+                if path == "/api/version":
+                    self.monitor_once(value)
+                    return {"version": "0.34.0"}
+                if path == "/api/tags":
+                    return {"models": [{"name": gateway.MODEL, "digest": gateway.DIGEST}]}
+                self.fail("Unexpected API request")
+            with patch.object(gateway, "OwnedRuntime", return_value=owned), \
+                    patch.object(gateway.socket, "socket") as socket_factory, \
+                    patch.object(gateway, "resources", return_value=value.sample.copy()), \
+                    patch.object(gateway, "ollama_json", side_effect=api):
+                socket_factory.return_value.__enter__.return_value.connect_ex.return_value = 1
+                value.ensure_runtime()
+        self.assertIs(value.runtime, owned)
+        self.assertFalse(value.cancel.is_set())
+        self.assertNotIn("error", value.sample)
+        self.assertEqual(value.last_failure["code"], "runtime_status_unavailable")
+        value.stop_runtime.assert_not_called()
+
+    def test_transient_ps_failure_during_generation_preserves_job_and_gpu_sample(self):
+        value = worker()
+        value.runtime, value.active, value.loaded = Mock(), str(uuid.uuid4()), True
+        value.runtime.alive.return_value = True
+        sample = {**value.sample, "free_mib": 4500, "utilization_percent": 96}
+        with TemporaryDirectory() as directory:
+            value.root = Path(directory)
+            with patch.object(gateway, "resources", return_value=sample), \
+                    patch.object(gateway, "ollama_json", side_effect=TimeoutError("secret prompt is not diagnostic data")):
+                self.monitor_once(value)
+        self.assertEqual(value.sample, sample)
+        self.assertFalse(value.cancel.is_set())
+        self.assertFalse(value.loaded)
+        self.assertEqual(gateway.resource_error(value.sample, value.loaded), "gpu_vram_low")
+        self.assertIsNone(gateway.resource_error(value.sample, value.loaded, admission=False))
+        self.assertEqual(value.last_failure["code"], "runtime_status_unavailable")
+        self.assertNotIn("secret", json.dumps(value.status()))
+        value.stop_runtime.assert_not_called()
+
+    def test_ps_recovers_residency_after_transient_failure(self):
+        value = worker()
+        value.runtime = Mock()
+        value.runtime.alive.return_value = True
+        sample = {**value.sample, "free_mib": 4500}
+        with TemporaryDirectory() as directory:
+            value.root = Path(directory)
+            with patch.object(gateway, "resources", return_value=sample), \
+                    patch.object(gateway, "ollama_json", side_effect=[TimeoutError(), {"models": [{"name": gateway.MODEL}]}]):
+                self.monitor_once(value)
+                self.assertFalse(value.status()["ready"])
+                self.monitor_once(value)
+        self.assertTrue(value.loaded)
+        self.assertTrue(value.status()["ready"])
+        value.stop_runtime.assert_not_called()
+
+    def test_resource_monitor_failure_cancels_active_runtime_without_polling_ps(self):
+        value = worker()
+        value.runtime, value.active = Mock(), str(uuid.uuid4())
+        with TemporaryDirectory() as directory:
+            value.root = Path(directory)
+            with patch.object(gateway, "resources", side_effect=OSError("untrusted exception details")), \
+                    patch.object(gateway, "ollama_json") as api:
+                self.monitor_once(value)
+        self.assertTrue(value.cancel.is_set())
+        self.assertEqual(value.interrupt_reason, "gpu_monitor_failed")
+        self.assertTrue(value.sample["error"])
+        self.assertEqual(value.last_failure["code"], "gpu_monitor_failed")
+        value.stop_runtime.assert_called_once()
+        api.assert_not_called()
+
+    def test_monitor_cancels_on_real_reserve_or_temperature_violation(self):
+        for key, limit, reason in [("free_mib", 2047, "gpu_vram_low"),
+                                   ("ram_free_mib", 4095, "host_memory_low"),
+                                   ("temperature_c", 85, "gpu_temperature")]:
+            with self.subTest(resource=key), TemporaryDirectory() as directory:
+                value = worker()
+                value.root = Path(directory)
+                value.runtime, value.active = Mock(), str(uuid.uuid4())
+                with patch.object(gateway, "resources", return_value={**value.sample, key: limit}), \
+                        patch.object(gateway, "ollama_json") as api:
+                    self.monitor_once(value)
+                self.assertTrue(value.cancel.is_set())
+                self.assertEqual(value.interrupt_reason, reason)
+                self.assertEqual(value.last_failure["code"], reason)
+                value.stop_runtime.assert_called_once()
+                api.assert_not_called()
+
+    def test_status_result_from_stopped_runtime_cannot_claim_model_loaded(self):
+        value = worker()
+        value.runtime = Mock()
+        value.runtime.alive.return_value = True
+        def late_status(path):
+            value.runtime = None
+            return {"models": [{"name": gateway.MODEL}]}
+        with TemporaryDirectory() as directory:
+            value.root = Path(directory)
+            with patch.object(gateway, "resources", return_value=value.sample.copy()), \
+                    patch.object(gateway, "ollama_json", side_effect=late_status):
+                self.monitor_once(value)
+        self.assertFalse(value.loaded)
+
+    def test_failure_diagnostic_is_bounded_allowlisted_and_has_utc_time(self):
+        value = worker()
+        self.assertIsNone(value.status()["last_failure"])
+        with patch.object(gateway.time, "strftime", return_value="2026-09-13T04:00:00Z"):
+            value.record_failure("request_timeout")
+            self.assertEqual(value.status()["last_failure"],
+                             {"code": "request_timeout", "at_utc": "2026-09-13T04:00:00Z"})
+            value.record_failure("private prompt, token, or arbitrary error detail" * 1000)
+        self.assertEqual(value.last_failure,
+                         {"code": "runtime_unavailable", "at_utc": "2026-09-13T04:00:00Z"})
+
     def test_accepts_bounded_conversation_and_evidence(self):
         value = payload()
         value["evidence"] = [source()]

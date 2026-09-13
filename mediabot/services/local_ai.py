@@ -26,6 +26,24 @@ DESKTOP_UNAVAILABLE_REASONS = {
     "gpu_vram_low": "desktop GPU memory is below its reserve",
     "foreign_gpu_workload": "desktop GPU is busy with another workload",
 }
+DESKTOP_FAILURE_REASONS = {
+    **DESKTOP_UNAVAILABLE_REASONS,
+    "request_timeout": "desktop generation reached its deadline",
+    "desktop_disabled": "desktop AI was switched off during the request",
+    "runtime_unavailable": "desktop model runtime became unavailable",
+    "runtime_error": "desktop model runtime reported an inference error",
+    "runtime_response_invalid": "desktop model returned an incomplete or invalid answer",
+    "runtime_response_oversized": "desktop answer exceeded its output limit",
+    "runtime_port_in_use": "another process occupies the desktop model runtime port",
+    "runtime_version_mismatch": "desktop model runtime version did not match",
+    "model_digest_mismatch": "desktop model files did not match the configured model",
+    "request_already_seen": "desktop worker already handled or cancelled this request ID",
+    "invalid_request": "desktop worker rejected the request format",
+    "desktop_transport_timeout": "connection to desktop AI timed out",
+    "desktop_transport_failed": "connection to desktop AI was interrupted",
+    "desktop_tls_failed": "secure connection to desktop AI failed",
+    "desktop_unknown_failure": "desktop worker reported an unrecognized failure",
+}
 CONVERSATION_MODELS = {
     MODEL: {"digest": MODEL_DIGEST, "label": "Llama 3.2 3B"},
     "qwen3.5:4b": {
@@ -167,7 +185,12 @@ class LocalAIService:
                         detail = DESKTOP_UNAVAILABLE_REASONS.get(reason, "desktop worker is not ready") if isinstance(reason, str) else "desktop worker is not ready"
                         raise LocalAIError("Desktop AI is unavailable: " + detail + ". Desktop AI was required or no server fallback was permitted. No server request was made. Open MediaBot Desktop AI on the desktop, or check `$admin ai status`.")
                     if code in {"desktop_request_interrupted", "desktop_request_failed", "desktop_response_mismatch"}:
-                        raise LocalAIError("Desktop AI did not finish this request. It was not retried on another GPU. Try again when the desktop is available.")
+                        reason = body.get("desktop_reason")
+                        defaults = {"desktop_request_interrupted": "desktop_transport_failed",
+                                    "desktop_request_failed": "desktop_unknown_failure",
+                                    "desktop_response_mismatch": "desktop_response_mismatch"}
+                        detail = DESKTOP_FAILURE_REASONS.get(reason, DESKTOP_FAILURE_REASONS[defaults[code]]) if isinstance(reason, str) else DESKTOP_FAILURE_REASONS[defaults[code]]
+                        raise LocalAIError("Desktop AI did not finish: " + detail + ". It was not retried on another GPU.")
                     if (response.status == 400 and code == "invalid_request"
                             and payload.get("profile") == "conversation"):
                         raise _ConversationProfileUnsupported("The gateway uses the older generation protocol.")

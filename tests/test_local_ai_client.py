@@ -38,6 +38,37 @@ class SequentialSession(Session):
  def post(self,url,**kwargs):self.calls.append((url,kwargs));return next(self.responses)
 
 class LocalAIClientTests(unittest.IsolatedAsyncioTestCase):
+ async def test_dispatched_desktop_failures_explain_category_without_replay_or_private_details(self):
+  for category,reason,expected in (
+    ('desktop_request_failed','request_timeout','generation reached its deadline'),
+    ('desktop_request_failed','gpu_vram_low','GPU memory is below its reserve'),
+    ('desktop_request_failed','host_memory_low','RAM is below its reserve'),
+    ('desktop_request_failed','gpu_monitor_failed','GPU monitoring failed'),
+    ('desktop_request_failed','runtime_error','runtime reported an inference error'),
+    ('desktop_request_failed','desktop_disabled','switched off during the request'),
+    ('desktop_request_interrupted','desktop_transport_timeout','connection to desktop AI timed out'),
+    ('desktop_request_interrupted','desktop_transport_failed','connection to desktop AI was interrupted'),
+    ('desktop_request_interrupted','desktop_tls_failed','secure connection to desktop AI failed'),
+    ('desktop_response_mismatch','desktop_response_mismatch','model or protocol did not match')):
+   client=self.client({'error':category,'desktop_reason':reason,'detail':'private-secret-value'},503)
+   with self.subTest(reason=reason),self.assertRaisesRegex(LocalAIError,expected) as caught:
+    await client.chat(ID,MESSAGES,profile='conversation',allowed_backends=('server','desktop'))
+   self.assertIn('not retried on another GPU',str(caught.exception))
+   self.assertNotIn('private-secret-value',str(caught.exception))
+   self.assertEqual(len(client.session.calls),1)
+
+ async def test_unknown_desktop_failure_reason_and_legacy_missing_reason_are_safe(self):
+  for reason in ('private-secret-value',{'private':'private-secret-value'},None):
+   for code in ('desktop_request_failed','desktop_request_interrupted','desktop_response_mismatch'):
+    body={'error':code,'detail':'private-secret-value'}
+    if reason is not None:body['desktop_reason']=reason
+    client=self.client(body,503)
+    with self.subTest(reason=reason,code=code),self.assertRaises(LocalAIError) as caught:
+     await client.chat(ID,MESSAGES,profile='conversation',allowed_backends=('desktop',))
+    self.assertNotIn('private-secret-value',str(caught.exception))
+    self.assertIn('not retried on another GPU',str(caught.exception))
+    self.assertEqual(len(client.session.calls),1)
+
  async def test_desktop_requirement_failure_explains_actual_resource_reason_without_replay(self):
   client=self.client({'error':'desktop_unavailable_no_fallback','desktop_reason':'gpu_vram_low'},503)
   with self.assertRaisesRegex(LocalAIError,'GPU memory.*No server request'):

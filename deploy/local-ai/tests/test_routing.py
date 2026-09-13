@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 from pathlib import Path
 import unittest
@@ -16,6 +17,70 @@ EVIDENCE = [{'id': 'S1', 'title': 'Example source', 'url': 'https://example.com/
 
 
 class RoutingTests(unittest.TestCase):
+    def test_dispatched_worker_failure_keeps_safe_reason_without_server_replay(self):
+        for reason in ('request_timeout', 'gpu_vram_low', 'host_memory_low', 'gpu_monitor_failed',
+                       'runtime_error', 'runtime_unavailable', 'runtime_response_invalid', 'desktop_disabled'):
+            with self.subTest(reason=reason), patch.object(G, 'desktop_status', return_value={'ready': True}), \
+                    patch.object(G, 'desktop_request', return_value=(503, {'error': reason})) as request, \
+                    patch.object(G, 'chat') as server:
+                with self.assertRaises(G.DesktopRequestFailure) as caught:
+                    G.route_chat(G.Job(ID), MESSAGES, profile='conversation', allowed_backends=['server', 'desktop'])
+                self.assertEqual(str(caught.exception), 'desktop_request_failed')
+                self.assertEqual(caught.exception.reason, reason)
+                request.assert_called_once()
+                server.assert_not_called()
+
+    def test_unknown_worker_details_are_not_forwarded_and_auth_is_distinct(self):
+        for status, reason, expected in ((503, 'private prompt or credential', 'desktop_unknown_failure'),
+                                         (503, {'private': 'detail'}, 'desktop_unknown_failure'),
+                                         (503, None, 'desktop_unknown_failure'),
+                                         (401, 'private auth detail', 'desktop_auth_failed')):
+            with self.subTest(status=status, reason=reason), \
+                    patch.object(G, 'desktop_request', return_value=(status, {'error': reason, 'detail': 'secret'})):
+                with self.assertRaises(G.DesktopRequestFailure) as caught:
+                    G.forward_desktop(G.Job(ID), MESSAGES, [])
+                self.assertEqual(caught.exception.reason, expected)
+                self.assertNotIn('private', str(caught.exception))
+
+    def test_transport_timeout_tls_disconnect_and_invalid_json_have_distinct_safe_reasons(self):
+        for error, category, reason in ((TimeoutError('secret'), 'desktop_request_interrupted', 'desktop_transport_timeout'),
+                                        (G.ssl.SSLError('secret'), 'desktop_request_interrupted', 'desktop_tls_failed'),
+                                        (ConnectionResetError('secret'), 'desktop_request_interrupted', 'desktop_transport_failed'),
+                                        (G.http.client.RemoteDisconnected('secret'), 'desktop_request_interrupted', 'desktop_transport_failed'),
+                                        (ValueError('private malformed response'), 'desktop_response_mismatch', 'desktop_response_mismatch')):
+            with self.subTest(reason=reason), patch.object(G, 'desktop_request', side_effect=error):
+                with self.assertRaises(G.DesktopRequestFailure) as caught:
+                    G.forward_desktop(G.Job(ID), MESSAGES, [])
+                self.assertEqual((str(caught.exception), caught.exception.reason), (category, reason))
+
+    def test_forwarded_cancellation_keeps_cancellation_semantics(self):
+        with patch.object(G, 'desktop_request', return_value=(409, {'error': 'cancelled'})):
+            with self.assertRaisesRegex(RuntimeError, '^cancelled$'):
+                G.forward_desktop(G.Job(ID), MESSAGES, [])
+        job = G.Job(ID)
+        def interrupted(*args, **kwargs):
+            job.cancelled.set()
+            raise TimeoutError('private transport detail')
+        with patch.object(G, 'desktop_request', side_effect=interrupted):
+            with self.assertRaisesRegex(RuntimeError, '^cancelled$'):
+                G.forward_desktop(job, MESSAGES, [])
+
+    def test_handler_returns_request_identity_and_allowlisted_failure_reason(self):
+        handler = object.__new__(G.Handler)
+        handler.path = '/v1/chat'
+        body = json.dumps({'request_id': ID, 'messages': MESSAGES, 'profile': 'conversation', 'allowed_backends': ['desktop']}).encode()
+        handler.headers = {'Content-Length': str(len(body))}
+        handler.rfile = io.BytesIO(body)
+        handler.connection = MagicMock()
+        handler.authorized = MagicMock(return_value=True)
+        handler.send = MagicMock()
+        with patch.object(G, 'ACTIVE', None), patch.object(G, 'CANCELLED', {}), \
+                patch.object(G, 'route_chat', side_effect=G.DesktopRequestFailure('desktop_request_failed', 'request_timeout')):
+            handler.do_POST()
+            self.assertIsNone(G.ACTIVE)
+        handler.send.assert_called_once_with(503, {'error': 'desktop_request_failed', 'request_id': ID,
+                                                   'desktop_reason': 'request_timeout'})
+
     def test_web_clock_is_trusted_context_and_evidence_stays_quoted(self):
         connection = MagicMock()
         response = connection.getresponse.return_value

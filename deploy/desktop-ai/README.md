@@ -74,6 +74,11 @@ load. A loaded model can accept requests while at least 2 GiB GPU memory and
 least 75 percent. A running request stops if remaining memory falls below those
 reserves, temperature reaches 85 C, or resource monitoring fails.
 
+Ollama's loaded-model status is polled separately from physical GPU/RAM sensors.
+A temporary status failure during startup or generation does not stop safe
+inference. Until residency is known again, new requests require the cold-load
+headroom. The normal memory and temperature protections continue running.
+
 The worker uses an 8192-token context, a 4096-token generation budget including
 reasoning, and a 120-second request deadline. It serializes requests. Model
 weights and extra context still compete with games and desktop applications;
@@ -85,6 +90,11 @@ The gateway also checks local blob presence and sizes and the serving runtime's
 model digest. It never silently pulls a missing or updated model.
 
 If ON fails, inspect `gateway-errors.log` in the installation directory and run
-Status. Logs do not record prompts, source excerpts, or credentials. An
+Status. The authenticated status response includes `last_failure`, an allowlisted
+code and UTC timestamp retained until the worker restarts. A recovered
+`runtime_status_unavailable` can remain there even when the worker is ready.
+Paused bot replies distinguish generation deadlines, resource limits, runtime
+errors, and transport failures. Logs and failure receipts do not record prompts,
+source excerpts, credentials, or arbitrary exception text. An
 unavailable worker is not a reason to change GPU bindings, expose Ollama, or
 disable the media server's existing safety controls.

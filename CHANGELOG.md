@@ -7,6 +7,21 @@ and this project uses semantic version numbers.
 
 ## [Unreleased]
 
+## [2.8.3] - 2026-09-12
+
+### Fixed
+
+- Separate physical GPU/RAM monitoring from Ollama's loaded-model status poll.
+  A temporary model-status failure during startup or inference no longer kills
+  the worker as a falsely reported GPU-monitor failure. Actual resource sampling
+  failures, temperature limits, and memory reserves still interrupt inference.
+- Preserve bounded desktop failure reasons through the server gateway and bot.
+  Paused replies distinguish resource limits, runtime failures, timeouts, and
+  connection or protocol failures without exposing private error payloads.
+- Retain a sanitized last-failure code and UTC timestamp in desktop status for
+  diagnosing intermittent failures. Prompts, sources, and credentials are omitted.
+  Failed desktop requests remain on that backend and are never silently retried.
+
 ## [2.8.2] - 2026-09-12
 
 ### Fixed

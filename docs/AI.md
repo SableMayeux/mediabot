@@ -130,6 +130,13 @@ explicit additional deployment, not enabled by changing a model name.
    and whether web search is configured; individual searches report provider
    failures directly.
 
+If a dispatched desktop request stops, the paused response reports a bounded
+reason such as a generation deadline, memory reserve, runtime error, or broken
+connection. It is not silently rerun on another GPU. Desktop worker Status also
+retains a sanitized last-failure code and UTC timestamp until restart. A failed
+Ollama status poll is separate from the physical GPU/RAM monitor and does not
+terminate otherwise safe inference.
+
 The server retains its media-priority GPU interlock. Structured task extraction
 and recommendation classification continue using their existing server profile
 and validators. Web evidence expands only the conversational context, and

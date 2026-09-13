@@ -27,6 +27,13 @@ DIGEST = "sha256:38044be4f923e5a55264ed7df4eaac2676651a905f735197c504045140c02bd
 OLLAMA = "http://127.0.0.1:11440"
 MAX_BODY = 65536
 MAX_OUTPUT = 45000
+FAILURE_CODES = frozenset({
+    "cancelled", "desktop_disabled", "request_timeout", "gpu_monitor_unavailable",
+    "gpu_monitor_failed", "gpu_temperature", "host_memory_low", "gpu_vram_low",
+    "foreign_gpu_workload", "runtime_port_in_use", "runtime_version_mismatch",
+    "model_digest_mismatch", "runtime_unavailable", "runtime_status_unavailable",
+    "runtime_response_invalid", "runtime_error", "runtime_response_oversized",
+})
 SYSTEM = (
     "You are a local assistant for a Discord community. Answer directly and naturally. "
     "Give enough reasoning, examples, and practical detail for the question; avoid padding. "
@@ -254,7 +261,7 @@ class Worker:
         self.lock, self.runtime_lock = threading.Lock(), threading.Lock()
         self.stop, self.cancel = threading.Event(), threading.Event()
         self.active, self.leases, self.runtime = None, {}, None
-        self.sample, self.loaded, self.monitor_error = {}, False, None
+        self.sample, self.loaded, self.last_failure = {}, False, None
         self.interrupt_reason = "cancelled"
         self.verify_artifacts()
 
@@ -308,15 +315,16 @@ class Worker:
                 self.runtime = None
             self.loaded = False
 
+    def record_failure(self, code):
+        # One bounded diagnostic receipt. Never retain prompts, tokens, source text,
+        # or arbitrary exception messages supplied by a runtime or transport.
+        self.last_failure = {"code": code if code in FAILURE_CODES else "runtime_unavailable",
+                             "at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+
     def monitor(self):
         while not self.stop.is_set():
             try:
                 self.sample = resources()
-                if self.runtime and self.runtime.alive():
-                    models = ollama_json("/api/ps").get("models", [])
-                    self.loaded = any(m.get("name") == MODEL for m in models)
-                else:
-                    self.loaded = False
                 error = resource_error(self.sample, self.loaded, admission=False)
             except Exception:
                 self.sample = {"sampled": time.monotonic(), "error": True}
@@ -324,13 +332,31 @@ class Worker:
             if (self.root / "stop.request").exists():
                 self.stop.set()
                 self.interrupt_reason = "desktop_disabled"
+                self.record_failure(self.interrupt_reason)
                 self.cancel.set()
                 self.stop_runtime()
                 return
             if error and self.runtime:
                 self.interrupt_reason = error
+                self.record_failure(error)
                 self.cancel.set()
                 self.stop_runtime()
+            elif not error:
+                runtime = self.runtime
+                try:
+                    if runtime and runtime.alive():
+                        models = ollama_json("/api/ps").get("models", [])
+                        self.loaded = (runtime is self.runtime
+                                       and any(m.get("name") == MODEL for m in models))
+                    else:
+                        self.loaded = False
+                except Exception:
+                    # Ollama may not listen yet during startup, or its status API
+                    # may time out during model loading. This is not a GPU/RAM
+                    # sensor failure and must not kill an otherwise safe job.
+                    # Unknown residency requires cold-load headroom for admission.
+                    self.loaded = False
+                    self.record_failure("runtime_status_unavailable")
             self.stop.wait(1)
 
     def status(self):
@@ -340,6 +366,7 @@ class Worker:
                 "profile": "conversation", "backend": "desktop", "loaded": self.loaded,
                 "reason": "busy" if self.active else error,
                 "capabilities": ["conversation", "web_evidence"],
+                "last_failure": self.last_failure,
                 "resources": {k: v for k, v in self.sample.items() if k != "sampled"}}
 
     def request_cancel(self, request_id):
@@ -422,12 +449,15 @@ class Worker:
                     "tools_used": ["web_search"] if evidence else [], "done_reason": final.get("done_reason"),
                     "metrics": {k: final.get(k) for k in ("total_duration", "load_duration", "prompt_eval_count", "prompt_eval_duration", "eval_count", "eval_duration")},
                     "elapsed_seconds": round(time.monotonic() - started, 3)}
-        except Refusal:
+        except Refusal as exc:
+            self.record_failure(exc.code)
             self.stop_runtime()
             raise
         except Exception:
+            code = self.interrupt_reason if self.cancel.is_set() else "runtime_unavailable"
+            self.record_failure(code)
             self.stop_runtime()
-            raise Refusal(self.interrupt_reason if self.cancel.is_set() else "runtime_unavailable",
+            raise Refusal(code,
                           409 if self.cancel.is_set() and self.interrupt_reason == "cancelled" else 503)
         finally:
             deadline.set()

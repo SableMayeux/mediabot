@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import ssl
 import threading
 import time
 import uuid
@@ -60,12 +61,28 @@ DESKTOP_REASONS = frozenset({
     'gpu_monitor_unavailable', 'gpu_monitor_failed', 'gpu_temperature',
     'host_memory_low', 'gpu_vram_low', 'foreign_gpu_workload',
 })
+DESKTOP_FAILURE_REASONS = DESKTOP_REASONS | frozenset({
+    'request_timeout', 'desktop_disabled', 'runtime_unavailable', 'runtime_error',
+    'runtime_response_invalid', 'runtime_response_oversized', 'runtime_port_in_use',
+    'runtime_version_mismatch', 'model_digest_mismatch', 'request_already_seen',
+    'invalid_request', 'desktop_transport_timeout', 'desktop_transport_failed',
+    'desktop_tls_failed', 'desktop_unknown_failure',
+})
 
 
 class DesktopUnavailable(RuntimeError):
     def __init__(self, reason):
         super().__init__('desktop_unavailable_no_fallback')
         self.reason = reason if isinstance(reason, str) and reason in DESKTOP_REASONS else 'desktop_unavailable'
+
+
+class DesktopRequestFailure(RuntimeError):
+    """Retain reviewed failure codes, never raw worker text or transport details."""
+    def __init__(self, code, reason):
+        if code not in {'desktop_request_failed', 'desktop_request_interrupted', 'desktop_response_mismatch'}:
+            raise ValueError('Invalid desktop failure category.')
+        super().__init__(code)
+        self.reason = reason if isinstance(reason, str) and reason in DESKTOP_FAILURE_REASONS else 'desktop_unknown_failure'
 
 
 WEB_SYSTEM = (
@@ -216,7 +233,12 @@ def forward_desktop(job, messages, evidence):
         if job.cancelled.is_set():
             raise RuntimeError('cancelled')
         if status != 200:
-            raise RuntimeError('cancelled' if body.get('error') == 'cancelled' else 'desktop_request_failed')
+            reason = body.get('error')
+            if reason == 'cancelled' and status == 409:
+                raise RuntimeError('cancelled')
+            if status in (401, 403):
+                reason = 'desktop_auth_failed'
+            raise DesktopRequestFailure('desktop_request_failed', reason)
         if (body.get('request_id') != job.request_id or body.get('profile') != 'conversation'
                 or body.get('backend') != 'desktop' or body.get('model') != DESKTOP_MODEL
                 or body.get('model_manifest_sha256') != DESKTOP_DIGEST
@@ -224,10 +246,20 @@ def forward_desktop(job, messages, evidence):
                 or body.get('sources') != source_metadata(evidence)
                 or body.get('retrieval_used') is not bool(evidence)
                 or body.get('tools_used') != (['web_search'] if evidence else [])):
-            raise RuntimeError('desktop_response_mismatch')
+            raise DesktopRequestFailure('desktop_response_mismatch', 'desktop_response_mismatch')
         return body
     except (OSError, ValueError, http.client.HTTPException) as exc:
-        raise RuntimeError('cancelled' if job.cancelled.is_set() else 'desktop_request_interrupted') from exc
+        if job.cancelled.is_set():
+            raise RuntimeError('cancelled') from exc
+        if isinstance(exc, ssl.SSLError):
+            reason = 'desktop_tls_failed'
+        elif isinstance(exc, TimeoutError):
+            reason = 'desktop_transport_timeout'
+        elif isinstance(exc, ValueError):
+            raise DesktopRequestFailure('desktop_response_mismatch', 'desktop_response_mismatch') from exc
+        else:
+            reason = 'desktop_transport_failed'
+        raise DesktopRequestFailure('desktop_request_interrupted', reason) from exc
 
 
 def route_chat(job, messages, *, profile='structured', evidence=None, allowed_backends=None):
@@ -547,7 +579,7 @@ class Handler(BaseHTTPRequestHandler):
                                      evidence=body.get('evidence'), allowed_backends=body.get('allowed_backends')))
         except RuntimeError as error:
             failure = {'error': str(error), 'request_id': request_id}
-            if isinstance(error, DesktopUnavailable):
+            if isinstance(error, (DesktopUnavailable, DesktopRequestFailure)):
                 failure['desktop_reason'] = error.reason
             self.send(503 if str(error) != 'cancelled' else 409, failure)
         finally:
