@@ -57,6 +57,52 @@ services:
     logging:
       driver: json-file
       options: {max-size: 5m, max-file: "2"}
+  ollama-cpu:
+    image: ollama/ollama@sha256:aa6f86f01fee264c81f1edd9083ebfb07c8116d95d8bedd1ad470874b66a40b4
+    container_name: local-ai-ollama-cpu
+    profiles: [candidate]
+    restart: "no"
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 4g
+    memswap_limit: 4g
+    cpus: 4.0
+    cpu_shares: 128
+    tmpfs: ["/tmp:rw,nosuid,nodev,size=128m,mode=1777"]
+    healthcheck:
+      test: [CMD, ollama, list]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    environment:
+      HOME: /tmp
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_MODELS: /models
+      OLLAMA_NO_CLOUD: "true"
+      OLLAMA_NOPRUNE: "true"
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_MAX_QUEUE: "1"
+      OLLAMA_CONTEXT_LENGTH: "4096"
+      OLLAMA_KEEP_ALIVE: "0"
+      OLLAMA_KV_CACHE_TYPE: q8_0
+      OLLAMA_FLASH_ATTENTION: "true"
+      CUDA_VISIBLE_DEVICES: "-1"
+      NVIDIA_VISIBLE_DEVICES: void
+      OLLAMA_VULKAN: "false"
+    volumes:
+      - type: bind
+        source: ${LOCAL_AI_ROOT:?Set LOCAL_AI_ROOT}/models
+        target: /models
+        read_only: true
+    networks: [private]
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "2"}
   gateway:
     image: python@sha256:3121f8b0804aa3698ab750d9a39ea4a42657a385c9b133722b915e55c51551a6
     container_name: local-ai-gateway
@@ -76,6 +122,9 @@ services:
       PYTHONDONTWRITEBYTECODE: "1"
       GPU_STATE: /gpu-state/status.json
       TOKEN_FILE: /run/secrets/local_ai_token
+      LOCAL_AI_CONVERSATION_MODEL: ${LOCAL_AI_CONVERSATION_MODEL:-huihui_ai/qwen3-abliterated:8b-v2-q4_K_M}
+      LOCAL_AI_CPU_ENABLED: "true"
+      LOCAL_AI_MODE_FILE: /control-state/server-mode.json
       DESKTOP_AI_URL: ${DESKTOP_AI_URL:-}
       DESKTOP_AI_TOKEN_FILE: /run/secrets/desktop_ai_token
     healthcheck:
@@ -99,6 +148,9 @@ services:
         source: ${LOCAL_AI_ROOT:?Set LOCAL_AI_ROOT}/app
         target: /app
         read_only: true
+      - type: bind
+        source: ${LOCAL_AI_ROOT:?Set LOCAL_AI_ROOT}/control-state
+        target: /control-state
       - type: bind
         source: ${LOCAL_AI_ROOT:?Set LOCAL_AI_ROOT}/gpu-state
         target: /gpu-state

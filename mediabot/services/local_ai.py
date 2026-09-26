@@ -54,6 +54,14 @@ CONVERSATION_MODELS = {
         "digest": "sha256:38044be4f923e5a55264ed7df4eaac2676651a905f735197c504045140c02bd3",
         "label": "Gemma 4 12B",
     },
+    "huihui_ai/qwen3-abliterated:8b-v2-q4_K_M": {
+        "digest": "sha256:543f9deff86d8347fd96ea1f3e54e73861ea70d52def71d31ccaeaf013de6ba6",
+        "label": "Qwen3 8B v2, Huihui",
+    },
+    "qwen3:4b-instruct-2507-q4_K_M": {
+        "digest": "sha256:0edcdef34593eac1aa2be9c7d06c432dcf81945adca5eca2f27662c18f168ba0",
+        "label": "Qwen3 4B Instruct 2507",
+    },
 }
 
 
@@ -150,13 +158,13 @@ class LocalAIService:
             self.session = None
 
     async def request(self, route, payload):
-        if route not in {"/v1/chat", "/v1/cancel"}:
+        if route not in {"/v1/chat", "/v1/cancel", "/v1/server-mode"}:
             raise LocalAIError("Unsupported local model request.")
         await self.start()
         try:
             options = {"json": payload, "allow_redirects": False}
             if payload.get("profile") == "conversation":
-                options["timeout"] = aiohttp.ClientTimeout(total=195 if "desktop" in payload.get("allowed_backends", []) else 135)
+                options["timeout"] = aiohttp.ClientTimeout(total=500)
             async with self.session.post(self.base_url + route, **options) as response:
                 raw = bytearray()
                 async for chunk in response.content.iter_chunked(8192):
@@ -180,6 +188,12 @@ class LocalAIService:
                         raise LocalAIError("The local model's GPU safety monitor is unavailable. Try again after it recovers.")
                     if code == "request_timeout":
                         raise LocalAIError("Local generation reached its deadline. Try a shorter question.")
+                    if code == "reasoning_budget_exhausted":
+                        raise LocalAIError("The model used its reasoning budget without producing an answer. Try one focused question.")
+                    if code in {"server_mode_unavailable", "cpu_fallback_not_configured"}:
+                        raise LocalAIError("The server quality switch is unavailable. Its persistent state and CPU runtime need to be checked.")
+                    if code == "cpu_runtime_unavailable":
+                        raise LocalAIError("The server CPU model runtime is unavailable. Check the CPU container with the quality switch left in its current mode.")
                     if code == "desktop_unavailable_no_fallback":
                         reason = body.get("desktop_reason")
                         detail = DESKTOP_UNAVAILABLE_REASONS.get(reason, "desktop worker is not ready") if isinstance(reason, str) else "desktop worker is not ready"
@@ -225,6 +239,17 @@ class LocalAIService:
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
             raise LocalAIError("AI gateway status is unavailable.") from exc
 
+    async def set_quality(self, enabled):
+        if type(enabled) is not bool:
+            raise LocalAIError("Choose quality on or off.")
+        body = await self.request("/v1/server-mode", {"quality_enabled": enabled})
+        if (body.get("quality_enabled") is not enabled
+                or type(body.get("active_cancel_requested")) is not bool
+                or any(not isinstance(body.get(key), str) or body[key] not in CONVERSATION_MODELS
+                       for key in ("quality_model", "lightweight_model"))):
+            raise LocalAIError("The gateway returned an invalid quality-switch receipt.")
+        return body
+
     async def chat(self, request_id, messages, *, profile="structured", evidence=None, allowed_backends=("server",)):
         validate_identity(request_id)
         if profile not in ("structured", "conversation"):
@@ -262,6 +287,11 @@ class LocalAIService:
             body = await self.request("/v1/chat", {"request_id": request_id, "messages": messages})
         model = body.get("model")
         backend = body.get("backend", "server")
+        if "server_execution" in body:
+            if (backend != "server" or body["server_execution"] not in ("cpu", "gpu")
+                    or body.get("server_mode") not in ("quality", "playback")
+                    or (body.get("server_mode") == "playback" and body["server_execution"] != "cpu")):
+                raise LocalAIError("The local model returned mismatched server execution details.")
         if "fallback_reason" in body:
             reason = body["fallback_reason"]
             if (not isinstance(reason, str) or reason not in DESKTOP_UNAVAILABLE_REASONS

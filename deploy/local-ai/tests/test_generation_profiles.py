@@ -78,6 +78,14 @@ class GenerationProfileTests(unittest.TestCase):
         self.assertEqual(receipt['model'], QWEN)
         self.assertEqual(receipt['model_manifest_sha256'], G.CONVERSATION_MODELS[QWEN]['digest'])
 
+    def test_quality_model_enables_reasoning_and_retains_explicit_gpu_reserve(self):
+        receipt, payload, unloaded, connections = self.infer(profile='conversation', model=G.QUALITY_MODEL)
+        self.assertIs(payload['think'], True)
+        self.assertEqual(payload['options']['num_gpu'], 24)
+        self.assertEqual(payload['options']['num_predict'], 4096)
+        self.assertEqual(connections[0].kwargs['timeout'], 485)
+        self.assertEqual(receipt['model'], G.QUALITY_MODEL)
+
     def test_profile_selection_does_not_allow_options_or_caller_model_overrides(self):
         body = {'request_id': str(uuid.uuid4()), 'messages': MESSAGES}
         for profile in ('structured', 'conversation'):

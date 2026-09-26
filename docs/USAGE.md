@@ -203,7 +203,7 @@ mutually exclusive and combine with `--web` and `--private`. They retain your
 existing permissions and do not turn the desktop on. An unavailable required
 desktop produces an explanation without making a server request.
 
-The reply footer identifies the selected mode and actual model and GPU. With
+The reply footer identifies the selected mode, actual model, and GPU or CPU. With
 neither GPU flag, when the desktop is on, ready and permitted for your account, new
 conversations and follow-ups prefer it. Turning it off or sleeping the desktop
 allows new automatic requests to use the server only if you have server access;
@@ -221,6 +221,8 @@ The bot owner can run the same commands in the configured server or in DM:
 
 ```text
 $admin ai status
+$admin ai quality on
+$admin ai quality off
 $admin ai access @member
 $admin ai allow @member desktop
 $admin ai deny @member web

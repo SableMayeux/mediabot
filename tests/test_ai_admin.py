@@ -34,13 +34,27 @@ class AIAdminTests(unittest.IsolatedAsyncioTestCase):
             message=SimpleNamespace(id=999, mentions=[], channel=SimpleNamespace(id=700)))
 
     async def test_owner_controls_work_in_dm_and_server_but_reject_nonowner(self):
-        for name in ("admin ai", "admin ai access", "admin ai allow", "admin ai deny", "admin ai reset", "admin ai status"):
+        for name in ("admin ai", "admin ai access", "admin ai allow", "admin ai deny", "admin ai reset", "admin ai status", "admin ai quality"):
             for guild in (None, self.guild):
                 ctx = self.context(name, guild=guild)
                 self.assertTrue(await ctx.command.can_run(ctx))
             ctx = self.context(name, user=SimpleNamespace(id=99, bot=False))
             with self.assertRaises(app.commands.NotOwner):
                 await ctx.command.can_run(ctx)
+
+    async def test_quality_switch_calls_gateway_only_for_explicit_on_off(self):
+        for state, expected in (("on", True), ("OFF", False)):
+            ctx = self.context("admin ai quality")
+            setter = AsyncMock(return_value={"quality_enabled": expected, "active_cancel_requested": False})
+            with patch.object(app, "local_ai", SimpleNamespace(set_quality=setter)):
+                await app.admin_ai_quality.callback(ctx, state)
+            setter.assert_awaited_once_with(expected)
+            self.assertIn("restart", ctx.reply.await_args.args[0])
+        ctx = self.context("admin ai quality")
+        setter = AsyncMock()
+        with patch.object(app, "local_ai", SimpleNamespace(set_quality=setter)):
+            await app.admin_ai_quality.callback(ctx, "maybe")
+        setter.assert_not_awaited()
 
     async def test_numeric_dm_target_permissions_persist_and_reset_independently(self):
         ctx = self.context("admin ai allow")

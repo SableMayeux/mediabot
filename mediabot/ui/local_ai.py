@@ -85,7 +85,7 @@ def source_embeds(sources):
     return pages
 
 
-def conversation_embeds(prompt, answer="Thinking locally...", *, limit_reached=False, legacy_profile=False, model=MODEL, backend=None, web=False, backend_preference="auto", fallback_reason=None):
+def conversation_embeds(prompt, answer="Thinking locally...", *, limit_reached=False, legacy_profile=False, model=MODEL, backend=None, web=False, backend_preference="auto", fallback_reason=None, server_execution=None, server_mode=None):
     """Return lossless pages, each sent separately to respect Discord's limits."""
     question = str(prompt).strip()
     text = str(answer)
@@ -102,6 +102,8 @@ def conversation_embeds(prompt, answer="Thinking locally...", *, limit_reached=F
                            value=question[index:index + 1000], inline=False)
     label = CONVERSATION_MODELS[model]["label"] if model is not None else "Local model"
     host = {"server": " Server GPU.", "desktop": " Desktop GPU."}.get(backend, "")
+    if backend == "server" and server_execution == "cpu":
+        host = " Server CPU, playback mode." if server_mode == "playback" else " Server CPU, GPU reserved or unavailable."
     scope = " Web sources searched; no notes or actions." if web else " No notes or web searched; no tools or actions."
     footer = label + "." + host + scope + " Context expires after 10 minutes; these messages remain."
     footer += " " + BACKEND_LABELS[backend_preference] + "."
@@ -357,7 +359,8 @@ class LocalChatView(OwnerView):
                     limit_reached=isinstance(metrics, dict) and metrics.get("done_reason") == "length",
                     legacy_profile=result.get("legacy_profile") is True, model=result.get("model", MODEL),
                     backend=result.get("backend"), web=self.web,
-                    backend_preference=self.backend_preference, fallback_reason=result.get("fallback_reason"))
+                    backend_preference=self.backend_preference, fallback_reason=result.get("fallback_reason"),
+                    server_execution=result.get("server_execution"), server_mode=result.get("server_mode"))
                 if not await self.edit_response(content=None, embed=pages[0]):
                     return
                 for page in pages[1:]:

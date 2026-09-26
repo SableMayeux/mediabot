@@ -69,6 +69,18 @@ def foreign_compute_pids(identity):
                 raise RuntimeError('unresolved_gpu_process') from error
     return foreign
 
+def runtime_gpu_accessible(running):
+    if not running:
+        return False
+    try:
+        result = subprocess.run(['docker', 'exec', CONTAINER, 'nvidia-smi',
+            '--id=0', '--query-gpu=uuid', '--format=csv,noheader'],
+            capture_output=True, text=True, timeout=2)
+        return result.returncode == 0 and result.stdout.strip().startswith('GPU-')
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def collect():
     data = runtime()
     running = data['State']['Running']
@@ -78,7 +90,11 @@ def collect():
 
     memory = {line.split(':')[0]: int(line.split()[1]) for line in Path('/proc/meminfo').read_text().splitlines()}
     result = classify(gpu, foreign, memory['MemAvailable']//1024)
-    ready = data['State'].get('Health', {}).get('Status') == 'healthy'
+    accessible = runtime_gpu_accessible(running)
+    if running and not accessible:
+        result.update(healthy=False, admit=False, reason='gpu_runtime_unavailable')
+    result['runtime_gpu_accessible'] = accessible
+    ready = data['State'].get('Health', {}).get('Status') == 'healthy' and accessible
     result.update(runtime_running=running, runtime_ready=ready, runtime_id=data['Id'])
     # Recovery scheduling still uses idle resources while a stopped runtime has no health.
     result['resources_admit'] = result['admit']

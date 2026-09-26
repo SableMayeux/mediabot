@@ -159,7 +159,7 @@ PREFIX = "$"
 OWNER_DM_COMMANDS = frozenset({"think", "life"})
 ADMIN_DM_GUILDS = {}
 
-BOT_VERSION = "2.8.3"
+BOT_VERSION = "2.9.0"
 
 # discord.py normally wraps non-successful API responses in HTTPException, but
 # aiohttp connection failures can escape directly before Discord returns a
@@ -12718,6 +12718,7 @@ async def admin_ai(ctx):
     await ctx.reply(
         "**AI controls**\n"
         "`$admin ai status` - server, desktop, and web availability\n"
+        "`$admin ai quality on|off` - larger server model, or CPU playback mode\n"
         "`$admin ai access @user` - effective permissions and overrides\n"
         "`$admin ai allow @user desktop` - grant a capability\n"
         "`$admin ai deny @user web` - revoke a capability\n"
@@ -12798,9 +12799,43 @@ async def admin_ai_status(ctx):
         model = discord.utils.escape_markdown(str(value.get("model", "not reported")))[:100]
         reason = discord.utils.escape_mentions(str(value.get("reason", "not configured or unavailable")))[:300]
         embed.add_field(name=backend.capitalize(), value=f"{'Ready' if value.get('ready') is True else 'Unavailable'}\nModel: {model}\n{reason}", inline=False)
+    server = status.get("server", {})
+    if type(server.get("quality_enabled")) is bool:
+        enabled = server["quality_enabled"]
+        execution = "CPU" if server.get("execution") == "cpu" else "GPU"
+        embed.add_field(name="Server quality switch",
+            value=f"{'On' if enabled else 'Off, playback mode'}. Current selection: {execution}.\n"
+                  "`$admin ai quality on` selects the larger model when the GPU is free. "
+                  "`$admin ai quality off` uses the smaller CPU model. Playback can select CPU automatically.",
+            inline=False)
     embed.add_field(name="Web search", value="Configured; each search reports its own result or failure." if web_search.enabled else "Not configured.", inline=False)
     embed.add_field(name="How routing works", value="`$ask --desktop <question>` requires desktop AI without server fallback. `--server` uses server AI only. Without either flag, a ready permitted desktop is preferred. Server fallback requires server access. Selection and desktop switching do not grant permissions. Use the DesktopAI shortcut on the desktop to turn it on or off.", inline=False)
     await ctx.reply(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+
+@admin_ai.command(name="quality", help="Persist the server AI switch: $admin ai quality on|off. On prefers the larger model on the server GPU; off uses the smaller CPU model for media playback. Omit the choice to view status. Works in owner DM and the server.")
+@commands.is_owner()
+@require_admin_context()
+async def admin_ai_quality(ctx, state: str = None):
+    if state is None or state.casefold() == "status":
+        await admin_ai_status.callback(ctx)
+        return
+    choice = state.casefold()
+    if choice not in {"on", "off"}:
+        await ctx.reply("Use `$admin ai quality on` or `$admin ai quality off`. Off selects the smaller CPU model for playback.")
+        return
+    try:
+        result = await local_ai.set_quality(choice == "on")
+    except LocalAIError as exc:
+        await ctx.reply(f"Could not change server AI mode: {exc}")
+        return
+    text = ("Server quality is **on**. The larger model uses the server GPU when it is free; "
+            "new requests use the smaller CPU model during media activity." if choice == "on" else
+            "Server quality is **off, playback mode**. New server requests use the smaller CPU model, leaving the GPU for media.")
+    if result["active_cancel_requested"]:
+        text += " The active server GPU answer was cancelled so its model can unload. Ask again to use the CPU."
+    text += " This setting survives restarts. Use `$ask --server <question>` to require this server backend."
+    await ctx.reply(text, allowed_mentions=discord.AllowedMentions.none())
 
 
 @admin.command(name="server", help="List authorized servers or select one for admin commands in this DM. Usage: $admin server [server ID]")

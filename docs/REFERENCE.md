@@ -40,6 +40,7 @@ The default prefix is `$`.
 | `$admin users` | Bot owner and administrator: privately list Seerr accounts and their numeric IDs. |
 | `$admin link <Discord member or ID> <Seerr user or ID>` | Bot owner and administrator: map an existing Seerr account to a Discord member. |
 | `$admin ai status` | Bot owner and administrator: show current backend readiness and web configuration. |
+| `$admin ai quality on\|off` | Bot owner: persist server quality mode or the smaller CPU playback model. Works in DM and the server. Omit on/off for status. |
 | `$admin ai access <Discord member or ID>` | Show that person's effective server, desktop and web permissions. |
 | `$admin ai allow\|deny\|reset <Discord member or ID> server\|desktop\|web` | Bot owner and administrator: persist an independent capability override or restore its default. |
 

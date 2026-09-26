@@ -7,6 +7,29 @@ and this project uses semantic version numbers.
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-09-25
+
+### Added
+
+- Owner command `$admin ai quality on|off`, available in the server and DM.
+  The switch persists across restarts. On selects the larger server conversation
+  model when GPU resources permit; off uses a smaller CPU model for playback.
+- Pinned Huihui Qwen3 8B v2 and standard Qwen3 4B Instruct 2507 conversation models.
+  Quality mode enables bounded reasoning and explicitly limits GPU layers.
+  Structured task extraction retains its existing model and validators.
+- Isolated CPU runtime with no GPU devices, a four-core quota, a 4 GiB memory
+  limit, and fresh host-memory checks. New server requests can use it
+  automatically during media work; interrupted requests are not replayed.
+- Mode and actual CPU/GPU execution in owner status and conversation footers.
+  Switching off cancels an active server GPU answer and unloads that model.
+
+### Fixed
+
+- Retain the deployed GPU runtime-access check, so container health alone
+  cannot advertise a GPU that the runtime has lost access to.
+- Make missing current evidence explicit in the conversational instructions
+  and discourage guessed prices, recurring offers, and unrelated arithmetic.
+
 ## [2.8.3] - 2026-09-12
 
 ### Fixed

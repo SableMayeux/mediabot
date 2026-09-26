@@ -25,7 +25,7 @@ why and makes no server request.
 
 Web answers include source IDs such as `[S1]`, clickable source cards, and the
 retrieval time. Cards distinguish page text from a search-engine excerpt. The
-footer identifies the model and whether the desktop or server GPU answered.
+footer identifies the model and whether the desktop GPU, server GPU, or server CPU answered.
 The original question remains readable, and long answers continue in replies.
 
 The follow-up button retains GPU selection and web mode. Start a new `$ask` to
@@ -83,6 +83,49 @@ user receives an availability message instead. Once the desktop accepts a
 request, a disconnect is reported rather than rerunning it on another GPU.
 `$ask --desktop` enforces desktop-only for that conversation even when the
 requester also has server access. It does not change their saved permissions.
+
+## Server quality and playback switch
+
+The bot owner can use the same commands in DM or the allowed server:
+
+```text
+$admin ai quality on
+$admin ai quality off
+$admin ai quality
+$ask --server explain the tradeoff
+```
+
+**On** is the default. Server conversation uses Huihui's Qwen3 8B v2
+Q4_K_M with reasoning enabled. Its 4,096-token budget includes reasoning,
+with an eight-minute deadline. This community variant reduces refusals;
+it is not a guarantee of accuracy or an answer to every possible prompt.
+The model partially offloads to the GPU, with an explicit 24-layer limit
+on the reference 8 GiB RTX 4060 configuration.
+
+**Off** selects standard Qwen3 4B Instruct 2507 Q4_K_M on the CPU,
+leaving GPU memory for playback. Switching off cancels an active server GPU
+answer and unloads its model. It does not retry that answer. Ask again to
+use the smaller model. The selection persists across gateway and bot restarts.
+
+Even with quality on, new server requests use the CPU model while the GPU
+guard detects media work or insufficient headroom. A GPU answer already in
+progress is interrupted if playback starts. Both runtimes unload after each
+request. The CPU runtime has no GPU devices, is limited to four CPU cores with low scheduling priority and
+4 GiB RAM, and still requires a fresh monitor and sufficient host RAM.
+CPU answers favor focused responses and can take longer, especially with
+conversation history or web evidence. The CPU budget is 768 output tokens
+with a five-minute deadline.
+
+The smaller model is the standard instruction model, not an ablated variant.
+It retains its upstream behavior. Reducing refusals can also damage factual
+reliability, so the quality switch is a resource and model choice, not an accuracy guarantee.
+Current prices and events should use `--web` with checkable sources.
+
+The switch applies to server requests and does not change anyone's access.
+Use `--server` to select this path explicitly. Automatic desktop selection,
+when enabled and permitted, is separate. Structured task extraction continues
+using its existing Llama model and validators; the conversation switch does
+not give either model tools or control of the host.
 
 ## Desktop switch
 

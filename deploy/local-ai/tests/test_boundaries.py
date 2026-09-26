@@ -77,6 +77,14 @@ class BoundaryTests(unittest.TestCase):
   for gpu,foreign in [([7932,0,0,0,48],{123}),([7932,0,2,0,48],set()),([7932,0,0,2,48],set())]:
    state=W.classify(gpu,foreign,15929)
    self.assertFalse(state['healthy']);self.assertFalse(state['admit'])
+ def test_container_gpu_access_failure_is_not_ready(self):
+  with patch.object(W.subprocess,'run',return_value=MagicMock(returncode=1,stdout='')):
+   self.assertFalse(W.runtime_gpu_accessible(True))
+  with patch.object(W.subprocess,'run',return_value=MagicMock(returncode=0,stdout='GPU-fixture\n')):
+   self.assertTrue(W.runtime_gpu_accessible(True))
+  with patch.object(W.subprocess,'run') as command:
+   self.assertFalse(W.runtime_gpu_accessible(False))
+   command.assert_not_called()
  def test_inference_headroom_and_hard_stop_threshold(self):
   self.assertTrue(W.classify([5000,99,0,0,60],set(),10000)['healthy'])
   self.assertFalse(W.classify([5000,99,0,0,60],set(),10000)['admit'])

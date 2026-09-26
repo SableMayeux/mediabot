@@ -125,6 +125,14 @@ class WebAIUITests(unittest.IsolatedAsyncioTestCase):
                                        fallback_reason="desktop_offline")[0]
             self.assertNotIn("Server fallback:", card.footer.text)
 
+    def test_cpu_footer_identifies_playback_or_automatic_gpu_reservation(self):
+        for mode, expected in (("playback", "playback mode"), ("quality", "GPU reserved")):
+            card = conversation_embeds("Question", "Answer", backend="server",
+                server_execution="cpu", server_mode=mode)[0]
+            self.assertIn("Server CPU", card.footer.text)
+            self.assertIn(expected, card.footer.text)
+            self.assertNotIn("Server GPU.", card.footer.text)
+
     async def test_searches_only_current_question_and_shows_verified_sources_and_backend(self):
         view = self.view()
         view.history = [{"role": "user", "content": "Earlier private context"}]

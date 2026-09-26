@@ -38,6 +38,27 @@ class SequentialSession(Session):
  def post(self,url,**kwargs):self.calls.append((url,kwargs));return next(self.responses)
 
 class LocalAIClientTests(unittest.IsolatedAsyncioTestCase):
+ async def test_quality_switch_requires_boolean_and_confirmed_receipt(self):
+  quality='huihui_ai/qwen3-abliterated:8b-v2-q4_K_M'
+  light='qwen3:4b-instruct-2507-q4_K_M'
+  body={'quality_enabled':False,'quality_model':quality,'lightweight_model':light,'active_cancel_requested':True}
+  client=self.client(body)
+  self.assertEqual(await client.set_quality(False),body)
+  self.assertEqual(client.session.calls[0][0],URL+'/v1/server-mode')
+  for value in ('off',0,None):
+   with self.assertRaises(LocalAIError):await self.client(body).set_quality(value)
+  for update in ({'quality_enabled':True},{'active_cancel_requested':'false'},{'quality_model':'unknown'}):
+   with self.assertRaises(LocalAIError):await self.client({**body,**update}).set_quality(False)
+
+ async def test_cpu_answer_provenance_and_impossible_execution_receipts(self):
+  model='qwen3:4b-instruct-2507-q4_K_M'
+  body=answer(profile='conversation',backend='server',server_execution='cpu',server_mode='playback',
+              model=model,model_manifest_sha256=CONVERSATION_MODELS[model]['digest'])
+  result=await self.client(body).chat(ID,MESSAGES,profile='conversation')
+  self.assertEqual(result['server_execution'],'cpu')
+  for update in ({'server_execution':'gpu'},{'server_mode':'unknown'},{'backend':'desktop'}):
+   with self.assertRaises(LocalAIError):await self.client({**body,**update}).chat(ID,MESSAGES,profile='conversation')
+
  async def test_dispatched_desktop_failures_explain_category_without_replay_or_private_details(self):
   for category,reason,expected in (
     ('desktop_request_failed','request_timeout','generation reached its deadline'),
@@ -155,7 +176,7 @@ class LocalAIClientTests(unittest.IsolatedAsyncioTestCase):
   await client.chat(ID,MESSAGES,profile='conversation')
   options=client.session.calls[0][1]
   self.assertEqual(options['json'],{'request_id':ID,'messages':MESSAGES,'profile':'conversation'})
-  self.assertEqual(options['timeout'].total,135)
+  self.assertEqual(options['timeout'].total,500)
   self.assertFalse(options['allow_redirects'])
 
  async def test_structured_default_keeps_legacy_wire_contract(self):
