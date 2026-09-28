@@ -14,6 +14,7 @@ class QueueError(RuntimeError):
 class Ticket:
     request_id: str
     owner_id: int | None
+    expires_at: float = 0
     changed: asyncio.Event = field(default_factory=asyncio.Event)
     cancelled: bool = False
     dispatched: bool = False
@@ -52,9 +53,9 @@ class InferenceQueue:
             raise QueueError("The AI queue is full (20 requests). Try again after it clears.")
         if owner_id is not None and sum(t.owner_id == owner_id for t in self.tickets) >= self.per_user:
             raise QueueError("You already have two AI requests queued or running. Cancel one before adding another.")
-        ticket = Ticket(request_id, owner_id)
-        self.tickets.append(ticket)
         deadline = asyncio.get_running_loop().time() + self.wait_seconds
+        ticket = Ticket(request_id, owner_id, expires_at=deadline)
+        self.tickets.append(ticket)
         previous = None
         try:
             while True:

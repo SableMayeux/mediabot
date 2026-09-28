@@ -262,7 +262,7 @@ class LocalAIService:
         validate_identity(request_id)
         try:
             async with self.queue.slot(request_id, owner_id=owner_id, on_progress=on_progress) as ticket:
-                deadline = asyncio.get_running_loop().time() + self.queue.wait_seconds
+                deadline = ticket.expires_at
                 while True:
                     ticket.check()
                     # Permissions can change during a long queue wait. Routing is

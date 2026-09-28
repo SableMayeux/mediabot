@@ -28,6 +28,8 @@ and this project uses semantic version numbers.
   lengthy generation cannot expire the conversation controls.
 - Retry only an explicit gateway busy rejection before inference; interruptions
   and ambiguous network failures are never replayed.
+- Allow the GPU monitor to observe model unload before handing off the queue,
+  preventing a stale VRAM reading from needlessly selecting the CPU model.
 
 
 ## [2.9.0] - 2026-09-25

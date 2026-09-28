@@ -517,6 +517,24 @@ class FinishEarly(Exception):
     """The requester asked for a compact final answer instead of a long pass."""
 
 
+def wait_for_release_observation(released_at):
+    """Do not hand the next request a still-loaded GPU observation after unload.
+
+    Keep the admission slot for at most two seconds while the monitor catches
+    up. Never override its decision or delay a reported resource fault.
+    """
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        try:
+            state = json.loads(STATE.read_text())
+            if (not state.get('healthy') or
+                    state.get('observed_at', 0) >= released_at and state.get('admit')):
+                return
+        except (OSError, ValueError, TypeError):
+            return  # Admission still requires a fresh healthy monitor reading.
+        time.sleep(.1)
+
+
 def chat(job, messages, *, profile='structured', evidence=None):
     try:
         return chat_pass(job, messages, profile=profile, evidence=evidence)
@@ -661,7 +679,10 @@ def chat_pass(job, messages, *, profile='structured', evidence=None, brief=False
         try:
             unload.request('POST', '/api/generate', json.dumps({'model': model, 'keep_alive': 0}),
                            {'Content-Type': 'application/json'})
-            unload.getresponse().read(65536)
+            unloaded = unload.getresponse()
+            unloaded.read(65536)
+            if not cpu and unloaded.status == 200:
+                wait_for_release_observation(time.time())
         except (OSError, http.client.HTTPException):
             pass  # The host monitor independently stops this runtime on resource contention.
         finally:

@@ -76,6 +76,25 @@ class FinishTests(unittest.TestCase):
                     G.chat(job, [{'role': 'user', 'content': 'Question'}], profile='conversation')
             infer.assert_called_once()
 
+    def test_unload_handoff_waits_for_fresh_admission_without_overriding_guard(self):
+        observed = [
+            {'observed_at': 99, 'healthy': True, 'admit': False},
+            {'observed_at': 101, 'healthy': True, 'admit': False},
+            {'observed_at': 102, 'healthy': True, 'admit': True},
+        ]
+        state = MagicMock()
+        state.read_text.side_effect = [json.dumps(item) for item in observed]
+        with patch.object(G, 'STATE', state), patch.object(G.time, 'sleep') as sleep:
+            G.wait_for_release_observation(100)
+        self.assertEqual(sleep.call_count, 2)
+        for item in ({'observed_at': 102, 'healthy': False, 'admit': False},
+                     {'observed_at': 102, 'healthy': True, 'admit': True}):
+            state.read_text.side_effect = None
+            state.read_text.return_value = json.dumps(item)
+            with patch.object(G, 'STATE', state), patch.object(G.time, 'sleep') as sleep:
+                G.wait_for_release_observation(100)
+            sleep.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()
