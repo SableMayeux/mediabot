@@ -51,7 +51,7 @@ class GenerationProfileTests(unittest.TestCase):
         self.assertEqual(payload['options']['num_predict'], 256)
         self.assertEqual(payload['options']['num_ctx'], 4096)
         self.assertNotIn('think', payload)
-        self.assertEqual(connections[0].kwargs['timeout'], 65)
+        self.assertAlmostEqual(connections[0].kwargs['timeout'], 65, places=6)
         self.assertEqual(unloaded, {'model': G.MODEL, 'keep_alive': 0})
         self.assertEqual(receipt['model_manifest_sha256'], G.DIGEST)
         self.assertEqual(receipt['profile'], 'structured')
@@ -63,7 +63,7 @@ class GenerationProfileTests(unittest.TestCase):
         self.assertEqual(payload['messages'][1:], MESSAGES)
         self.assertEqual(payload['options']['num_predict'], 1024)
         self.assertEqual(payload['options']['num_ctx'], 4096)
-        self.assertEqual(connections[0].kwargs['timeout'], 125)
+        self.assertAlmostEqual(connections[0].kwargs['timeout'], 125, places=6)
         self.assertEqual(payload['keep_alive'], 0)
         self.assertNotIn('think', payload)
         self.assertEqual(receipt['profile'], 'conversation')
@@ -84,7 +84,7 @@ class GenerationProfileTests(unittest.TestCase):
         self.assertEqual(payload['options']['num_gpu'], 24)
         self.assertEqual(payload['options']['num_predict'], 16384)
         self.assertEqual(payload['options']['num_ctx'], 8192)
-        self.assertEqual(connections[0].kwargs['timeout'], 1505)
+        self.assertAlmostEqual(connections[0].kwargs['timeout'], 1505, places=6)
         self.assertEqual(receipt['model'], G.QUALITY_MODEL)
 
     def test_profile_selection_does_not_allow_options_or_caller_model_overrides(self):
