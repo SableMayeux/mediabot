@@ -9837,6 +9837,7 @@ async def mediabot_help(
         embed = discord.Embed(title="MediaBot in DMs", description="\n".join(lines), color=discord.Color.blurple())
         embed.add_field(name="In the server", value="`$ask` answers in the channel. `$ask --private <question>` moves the answer to a DM. `$recommend --auto` optionally ranks provider suggestions with the local model. Media commands and torrent review currently require the configured server; an account link does not enable them in DMs.", inline=False)
         embed.add_field(name="AI routing and search", value="`--desktop` requires the desktop with no server fallback. `--server` uses only the server. Omit both to prefer a ready, permitted desktop with permitted server fallback. Follow-ups keep that selection and web mode. `--web` searches the current question and shows sources. `--private` controls Discord delivery, not search-provider privacy.", inline=False)
+        embed.add_field(name="Waiting and answer controls", value="Busy requests queue automatically and answer here when ready. Cancel generation removes a queued request or stops an active one. Finish sooner requests a compact answer during server generation. Conversation context expires ten minutes after the answer finishes.", inline=False)
         await ctx.reply(embed=embed)
         return
     can_use_torrent = is_bot_owner or is_administrator
