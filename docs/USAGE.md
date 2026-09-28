@@ -163,11 +163,12 @@ there. Public questions and answers remain visible in Discord.
 The local model sees the question and that conversation's limited temporary
 history. It cannot read your notes, browse channels, execute commands or change
 tasks. Follow-up controls retain the previous messages.
-Context expires after ten minutes; Discord's messages do not. This is not
+Context expires ten minutes after an answer finishes; Discord's messages do not. This is not
 persistent model memory.
 
-With an updated conversation gateway, answers have room for explanations and
-examples, up to 1,024 generated tokens. The footer identifies the model actually
+The server quality model has room for up to 16,384 generated tokens including
+thinking, with a 25-minute deadline. CPU playback mode allows 4,096 tokens and
+20 minutes. These are ceilings, not how long every answer takes. The footer identifies the model actually
 used and indicates when generation hit its limit. Long replies retain the full
 answer instead of silently cutting it off; continuation replies are used when
 the answer and question exceed Discord's embed limit. The original question
@@ -194,7 +195,12 @@ question goes to search providers, so repeat the topic in questions such as
 "Which of those Nintendo deals is cheapest?" Previous conversation messages
 remain local to the configured model gateway. `--private` controls Discord
 delivery; it does not keep a web search query private from upstream providers.
-Use **Cancel generation** to stop either search or model generation. **New
+Busy requests queue automatically, show their position, and answer here when
+ready. Up to two requests per user and 20 total can wait or run; waiting expires
+after one hour. Bot restarts clear the in-memory queue. Use **Finish sooner**
+during server generation to request a compact answer without extended thinking.
+It can still take time and does not support the desktop worker.
+Use **Cancel generation** to stop search, remove a queued request, or stop generation. **New
 topic** clears temporary context; start a fresh `$ask` to change GPU selection or web mode.
 
 Use `$ask --desktop <question>` to require the desktop model with no server

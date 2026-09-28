@@ -63,6 +63,11 @@ temporary history. Public follow-up questions and answers are visible in the
 channel; use a new private conversation for private follow-ups. `$help` works
 in DMs; other household media commands still use the configured server.
 
+AI requests queue automatically with a visible position. **Cancel generation**
+removes a queued request or stops an active one. **Finish sooner** requests a
+compact answer during server generation. Context expires ten minutes after
+the answer finishes, rather than while waiting or generating.
+
 `$ask --web <question>` enables bounded web retrieval for that conversation.
 Combine `--web`, `--private` and one optional GPU flag in any order before the question. Only the
 current question is searched, limited to 800 UTF-8 bytes; history is never sent

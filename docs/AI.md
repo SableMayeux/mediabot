@@ -33,8 +33,21 @@ change either; **New topic** clears history while keeping both settings.
 Each web follow-up searches only its new
 question, so include the subject again: "Which of those Nintendo games supports
 local co-op?" is more useful than "Which ones?" The short conversation history
-goes to the local model, not the search engines. Context expires after ten
-minutes; Discord messages remain. Cancel covers both search and generation.
+goes to the local model, not the search engines. Context expires ten minutes after the answer finishes; Discord messages remain.
+Cancel covers search, queued requests, and generation.
+
+Requests wait in a shared FIFO queue with a visible position and automatic delivery.
+The bot admits up to 20 requests, with at most two per user including their active
+request. Waiting expires after one hour. Queue contents and conversation history
+are in memory, so a bot restart clears them. Access is checked again before inference.
+Only a definite gateway busy rejection is retried; a timeout or interrupted
+generation is never silently replayed.
+
+During server generation, **Finish sooner** stops the long pass and asks the same
+model for a compact, complete answer without extended thinking. It keeps the
+original question and web evidence, and can still take time to finish. It does
+not publish a chopped-off draft. The desktop worker does not support this control.
+Use **Cancel generation** to discard the request instead.
 
 `--private` controls Discord delivery. Web search still sends the current query
 to upstream search engines and retrieves public pages. It does not search Life
@@ -96,8 +109,8 @@ $ask --server explain the tradeoff
 ```
 
 **On** is the default. Server conversation uses Huihui's Qwen3 8B v2
-Q4_K_M with reasoning enabled. Its 4,096-token budget includes reasoning,
-with an eight-minute deadline. This community variant reduces refusals;
+Q4_K_M with reasoning enabled. Its 16,384-token budget includes reasoning,
+with a 25-minute deadline and an 8,192-token context window. This community variant reduces refusals;
 it is not a guarantee of accuracy or an answer to every possible prompt.
 The model partially offloads to the GPU, with an explicit 24-layer limit
 on the reference 8 GiB RTX 4060 configuration.
@@ -112,9 +125,12 @@ guard detects media work or insufficient headroom. A GPU answer already in
 progress is interrupted if playback starts. Both runtimes unload after each
 request. The CPU runtime has no GPU devices, is limited to four CPU cores with low scheduling priority and
 4 GiB RAM, and still requires a fresh monitor and sufficient host RAM.
-CPU answers favor focused responses and can take longer, especially with
-conversation history or web evidence. The CPU budget is 768 output tokens
-with a five-minute deadline.
+CPU answers can take longer, especially with conversation history or web
+evidence. The CPU budget is 4,096 output tokens with a 20-minute deadline.
+Both modes aim to finish the requested explanation; no fixed 200-word instruction
+is applied. These are maximum budgets, not target response lengths. Ordinary
+questions can finish much sooner. A resource interruption still stops generation.
+A token-limited answer is explicitly marked incomplete, never presented as complete.
 
 The smaller model is the standard instruction model, not an ablated variant.
 It retains its upstream behavior. Reducing refusals can also damage factual

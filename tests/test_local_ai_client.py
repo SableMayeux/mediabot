@@ -149,12 +149,12 @@ class LocalAIClientTests(unittest.IsolatedAsyncioTestCase):
   for status in (404,302):
    with self.assertRaises(LocalAIError):await self.client({'error':'missing'},status).cancel(ID)
  async def test_bounded_stream_and_invalid_json(self):
-  with self.assertRaisesRegex(LocalAIError,'oversized'):await self.client(raw=b'x'*65537).chat(ID,MESSAGES)
+  with self.assertRaisesRegex(LocalAIError,'oversized'):await self.client(raw=b'x'*524289).chat(ID,MESSAGES)
   with self.assertRaises(LocalAIError):await self.client(raw=b'{partial').chat(ID,MESSAGES)
  async def test_specific_errors_and_private_detail_not_echoed(self):
-  for status,code,expected in ((429,'busy','another request'),(409,'cancelled','cancelled'),(503,'foreign_gpu_workload','yielding'),(503,'gpu_monitor_stale','safety monitor'),(503,'request_timeout','deadline'),(401,'unauthorized','unavailable')):
+  for status,code,expected in ((429,'busy','current AI request'),(409,'cancelled','cancelled'),(503,'foreign_gpu_workload','yielding'),(503,'gpu_monitor_stale','safety monitor'),(503,'request_timeout','deadline'),(401,'unauthorized','unavailable')):
    with self.subTest(code=code),self.assertRaisesRegex(LocalAIError,expected) as caught:
-    await self.client({'error':code,'detail':'private-secret-value'},status).chat(ID,MESSAGES)
+    await self.client({'error':code,'detail':'private-secret-value'},status)._chat(ID,MESSAGES)
    self.assertNotIn('private-secret-value',str(caught.exception))
  async def test_ambiguous_failure_is_not_retried(self):
   client=self.client(error=asyncio.TimeoutError())
@@ -176,7 +176,7 @@ class LocalAIClientTests(unittest.IsolatedAsyncioTestCase):
   await client.chat(ID,MESSAGES,profile='conversation')
   options=client.session.calls[0][1]
   self.assertEqual(options['json'],{'request_id':ID,'messages':MESSAGES,'profile':'conversation'})
-  self.assertEqual(options['timeout'].total,500)
+  self.assertEqual(options['timeout'].total,1530)
   self.assertFalse(options['allow_redirects'])
 
  async def test_structured_default_keeps_legacy_wire_contract(self):
@@ -199,7 +199,7 @@ class LocalAIClientTests(unittest.IsolatedAsyncioTestCase):
   self.assertEqual(len(client.session.calls),2)
 
  async def test_conversation_failures_never_trigger_ambiguous_retry(self):
-  for status,code in ((400,'different_error'),(429,'busy'),(503,'request_timeout'),(503,'foreign_gpu_workload'),(401,'unauthorized')):
+  for status,code in ((400,'different_error'),(429,'unknown'),(503,'request_timeout'),(503,'foreign_gpu_workload'),(401,'unauthorized')):
    client=self.client({'error':code},status)
    with self.subTest(status=status,code=code),self.assertRaises(LocalAIError):
     await client.chat(ID,MESSAGES,profile='conversation')

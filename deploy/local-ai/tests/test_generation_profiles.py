@@ -82,8 +82,9 @@ class GenerationProfileTests(unittest.TestCase):
         receipt, payload, unloaded, connections = self.infer(profile='conversation', model=G.QUALITY_MODEL)
         self.assertIs(payload['think'], True)
         self.assertEqual(payload['options']['num_gpu'], 24)
-        self.assertEqual(payload['options']['num_predict'], 4096)
-        self.assertEqual(connections[0].kwargs['timeout'], 485)
+        self.assertEqual(payload['options']['num_predict'], 16384)
+        self.assertEqual(payload['options']['num_ctx'], 8192)
+        self.assertEqual(connections[0].kwargs['timeout'], 1505)
         self.assertEqual(receipt['model'], G.QUALITY_MODEL)
 
     def test_profile_selection_does_not_allow_options_or_caller_model_overrides(self):

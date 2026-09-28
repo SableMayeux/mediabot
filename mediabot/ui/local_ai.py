@@ -105,7 +105,7 @@ def conversation_embeds(prompt, answer="Thinking locally...", *, limit_reached=F
     if backend == "server" and server_execution == "cpu":
         host = " Server CPU, playback mode." if server_mode == "playback" else " Server CPU, GPU reserved or unavailable."
     scope = " Web sources searched; no notes or actions." if web else " No notes or web searched; no tools or actions."
-    footer = label + "." + host + scope + " Context expires after 10 minutes; these messages remain."
+    footer = label + "." + host + scope + " Context expires 10 minutes after the answer; these messages remain."
     footer += " " + BACKEND_LABELS[backend_preference] + "."
     if backend == "server" and backend_preference == "auto" and fallback_reason:
         footer += " Server fallback: " + fallback_description(fallback_reason) + "."
@@ -174,7 +174,10 @@ class LocalChatView(OwnerView):
     def __init__(self, *, private=True, channel_id=None, authorize=None, access_policy=None, web_search=None, web=False, backend_preference="auto", **kwargs):
         if backend_preference not in BACKEND_LABELS:
             raise ValueError("Choose auto, desktop, or server routing.")
-        super().__init__(timeout=600, **kwargs)
+        # Discord's built-in timer measures from sending the controls, which can
+        # expire a queued or long-running request. Time only idle conversations.
+        super().__init__(timeout=None, **kwargs)
+        self._idle_task = None
         self.private = private
         self.channel_id = channel_id
         self.authorize = authorize
@@ -188,10 +191,30 @@ class LocalChatView(OwnerView):
         self.message = None
         self.active_request = None
         self.cancel_requested = None
+        self.finish_requested = None
         self.closed = False
         self.revision = 0
         self.turn_visible = False
         self.rebuild()
+        self.arm_idle_timer()
+
+    def arm_idle_timer(self):
+        if self._idle_task:
+            self._idle_task.cancel()
+        async def expire():
+            await asyncio.sleep(600)
+            await self.on_timeout()
+        self._idle_task = asyncio.create_task(expire())
+
+    def stop(self):
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        if self._idle_task and self._idle_task is not current:
+            self._idle_task.cancel()
+        self._idle_task = None
+        super().stop()
 
     async def permissions(self):
         allowed = await self.access_policy() if self.access_policy else {"server": True, "desktop": False, "web": True}
@@ -231,6 +254,11 @@ class LocalChatView(OwnerView):
                                    disabled=disabled or self.active_request is None)
         cancel.callback = partial(self.cancel, request_id=self.active_request, revision=self.revision)
         self.add_item(cancel)
+        finish = discord.ui.Button(label="Finish sooner", style=discord.ButtonStyle.secondary,
+            disabled=disabled or self.phase != "model" or self.active_request is None
+                     or self.finish_requested == self.active_request or self.backend_preference == "desktop")
+        finish.callback = partial(self.finish, request_id=self.active_request, revision=self.revision)
+        self.add_item(finish)
         follow = discord.ui.Button(label="Ask a follow-up", style=discord.ButtonStyle.primary,
                                    disabled=disabled or self.active_request is not None)
         follow.callback = partial(self.follow, revision=self.revision)
@@ -269,7 +297,11 @@ class LocalChatView(OwnerView):
                     await self.edit_response(content=str(exc), view=self)
                 return
             identity = self.active_request = str(uuid.uuid4())
+            if self._idle_task:
+                self._idle_task.cancel()
+                self._idle_task = None
             self.cancel_requested = None
+            self.finish_requested = None
             self.rebuild()
         try:
             async with self.lock:
@@ -340,7 +372,20 @@ class LocalChatView(OwnerView):
                         "Request cancelled before inference.", web=self.web))
                     return
                 self.phase = "model"
-            result = await self.service.chat(identity, messages, profile="conversation", evidence=evidence, allowed_backends=backends)
+            async def progress(phase, position):
+                async with self.lock:
+                    if not self.current(identity) or self.cancel_requested == identity:
+                        raise LocalAIError("Local generation cancelled.")
+                    self.phase = phase
+                    self.rebuild()
+                    text = (f"Queued, position {position}. I will answer here automatically when it is your turn. You can cancel while waiting."
+                            if phase == "queued" else "Generating a complete answer. Longer questions can take several minutes. You can cancel at any time.")
+                    card = conversation_embed(prompt, text, backend_preference=self.backend_preference)
+                    card.title = "AI request queued" if phase == "queued" else "Generating answer"
+                    await self.edit_response(content=None, embed=card, view=self)
+
+            result = await self.service.chat(identity, messages, profile="conversation", evidence=evidence,
+                allowed_backends=backends, owner_id=self.actor_id, on_progress=progress, authorize=self.permissions)
             current_backends = await self.permissions()
             async with self.lock:
                 if not self.current(identity):
@@ -361,6 +406,9 @@ class LocalChatView(OwnerView):
                     backend=result.get("backend"), web=self.web,
                     backend_preference=self.backend_preference, fallback_reason=result.get("fallback_reason"),
                     server_execution=result.get("server_execution"), server_mode=result.get("server_mode"))
+                if result.get("shortened") is True:
+                    for page in pages:
+                        page.set_footer(text=page.footer.text + " Shorter answer requested.")
                 if not await self.edit_response(content=None, embed=pages[0]):
                     return
                 for page in pages[1:]:
@@ -383,7 +431,7 @@ class LocalChatView(OwnerView):
                     await self.edit_response(content=None, embed=conversation_notice(prompt, str(exc), web=self.web))
         except asyncio.CancelledError:
             try:
-                if self.phase == "model":
+                if self.phase in ("model", "queued"):
                     await self.service.cancel(identity)
             except LocalAIError:
                 pass
@@ -396,6 +444,7 @@ class LocalChatView(OwnerView):
                     self.phase = None
                     self.rebuild()
                     if not self.closed and not self.is_finished():
+                        self.arm_idle_timer()
                         await self.edit_response(view=self)
 
     async def cancel(self, interaction, *, request_id=_CURRENT, revision=None):
@@ -413,7 +462,7 @@ class LocalChatView(OwnerView):
         try:
             if search_task is not None:
                 search_task.cancel()
-            elif self.phase == "model":
+            elif self.phase in ("model", "queued"):
                 await self.service.cancel(identity)
             text = "Cancellation requested."
         except LocalAIError as exc:
@@ -428,6 +477,29 @@ class LocalChatView(OwnerView):
                 await interaction.response.send_message("This control is busy or expired. Use the current conversation.", ephemeral=True)
                 return
             await interaction.response.send_modal(FollowupModal(self))
+
+    async def finish(self, interaction, *, request_id=_CURRENT, revision=None):
+        if not await self.interaction_check(interaction):
+            return
+        async with self.lock:
+            identity = self.active_request if request_id is _CURRENT else request_id
+            if (identity is None or not self.current(identity) or self.phase != "model"
+                    or self.finish_requested == identity
+                    or revision is not None and revision != self.revision):
+                await interaction.response.send_message("Use the current control while your answer is generating.", ephemeral=True)
+                return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await self.service.finish(identity)
+            async with self.lock:
+                if self.current(identity):
+                    self.finish_requested = identity
+                    self.rebuild()
+                    await self.edit_response(view=self)
+            text = "Requested a compact, complete answer. The server will stop the long pass and answer without an extended thinking pass. This can still take a little time."
+        except LocalAIError as exc:
+            text = str(exc)
+        await interaction.followup.send(text, ephemeral=True)
 
     async def fresh(self, interaction, *, revision=None):
         if not await self.interaction_check(interaction):
@@ -453,7 +525,7 @@ class LocalChatView(OwnerView):
             try:
                 if self.search_task is not None:
                     self.search_task.cancel()
-                elif self.phase == "model":
+                elif self.phase in ("model", "queued"):
                     await self.service.cancel(identity)
             except LocalAIError:
                 pass

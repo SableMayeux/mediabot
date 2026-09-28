@@ -7,6 +7,29 @@ and this project uses semantic version numbers.
 
 ## [Unreleased]
 
+## [2.10.0] - 2026-09-28
+
+### Added
+
+- Shared FIFO AI queue with visible positions, automatic delivery, cancellation,
+  fresh authorization before inference, and two requests per user. The bounded
+  queue is held in memory and expires waiting requests after one hour.
+- Requester-bound **Finish sooner** button for server answers. It stops the long
+  pass and requests a compact answer from the same model, retaining the question,
+  source evidence, resource guards, and original deadline. Desktop requests
+  retain their existing protocol and never replay on another GPU.
+
+### Changed
+
+- Quality mode allows 16,384 tokens including thinking and 25 minutes. CPU
+  playback allows 4,096 output tokens and 20 minutes. Remove the CPU prompt's
+  200-word preference and preserve long replies across Discord pages.
+- Start the ten-minute conversation expiry after completion, so waiting and
+  lengthy generation cannot expire the conversation controls.
+- Retry only an explicit gateway busy rejection before inference; interruptions
+  and ambiguous network failures are never replayed.
+
+
 ## [2.9.0] - 2026-09-25
 
 ### Added

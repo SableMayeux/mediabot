@@ -5,7 +5,7 @@ homelab deployment. It is an operator-managed reference configuration, not a
 universal GPU installer. Review host paths, service account, device index,
 resource limits, and model/runtime pins before adapting it to another machine.
 
-The fixed authenticated endpoints are `POST /v1/chat`, `POST /v1/cancel`,
+The fixed authenticated endpoints are `POST /v1/chat`, `POST /v1/cancel`, `POST /v1/finish`,
 `POST /v1/server-mode` (boolean `quality_enabled` only),
 `GET /v1/status`, and `GET /v1/health`. Health checks do not depend on an optional
 desktop being awake. Status additionally probes that desktop.
@@ -13,11 +13,16 @@ desktop being awake. Status additionally probes that desktop.
 The `structured` profile uses the pinned Llama model, 4,096 context, 256 output
 tokens, no web evidence, and no desktop routing. `conversation` permits the
 fixed server models and optional pinned desktop Gemma model. The larger
-Qwen3 8B Huihui model uses up to 4,096 tokens including reasoning;
+Qwen3 8B Huihui model uses up to 16,384 tokens including reasoning;
 the standard Qwen3 4B Instruct model runs on CPU during playback.
-The CPU output budget is 768 tokens with a five-minute deadline.
-The quality model has an eight-minute deadline.
-Server context is 4,096 tokens, or 8,192 with web evidence. Evidence
+The CPU output budget is 4,096 tokens with a 20-minute deadline. Quality mode
+allows 16,384 tokens including thinking and 25 minutes, with 8,192 tokens of
+context. GPU layer limits and resource guards still apply. MediaBot queues
+requests before gateway admission. The authenticated `/v1/finish` control
+requests a compact server answer without extended thinking, keeping the same
+model, backend, sources, and overall deadline.
+Quality context is 8,192 tokens. Other server models use 4,096 tokens,
+or 8,192 with web evidence. Evidence
 is limited to three sources and 6,000 UTF-8 bytes of text. Normal message text
 remains limited to 3,000 UTF-8 bytes. Source URLs are returned as provenance but
 omitted from the model prompt to conserve context.

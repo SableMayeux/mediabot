@@ -159,7 +159,7 @@ PREFIX = "$"
 OWNER_DM_COMMANDS = frozenset({"think", "life"})
 ADMIN_DM_GUILDS = {}
 
-BOT_VERSION = "2.9.0"
+BOT_VERSION = "2.10.0"
 
 # discord.py normally wraps non-successful API responses in HTTPException, but
 # aiohttp connection failures can escape directly before Discord returns a
@@ -9985,7 +9985,7 @@ async def mediabot_help(
         return
 
     if normalized_topic != "all":
-        embed.add_field(name="Local conversation", value=f"`{prefix}ask <question>` - answer here with automatic GPU selection\n`{prefix}ask --desktop <question>` - desktop only, no server fallback\n`{prefix}ask --server <question>` - server only\nAdd `--web` for cited sources or `--private` for DM delivery, before the question. GPU selection never grants access. Follow-ups keep your GPU selection and web mode.", inline=False)
+        embed.add_field(name="Local conversation", value=f"`{prefix}ask <question>` - answer here with automatic GPU selection\n`{prefix}ask --desktop <question>` - desktop only, no server fallback\n`{prefix}ask --server <question>` - server only\nAdd `--web` for cited sources or `--private` for DM delivery, before the question. GPU selection never grants access. Busy requests queue automatically. Cancel removes a queued request or stops generation; Finish sooner requests a compact server answer. Follow-ups keep your GPU selection and web mode.", inline=False)
         if is_bot_owner:
             embed.add_field(name="Your private Life workspace", value=f"`{prefix}think [--auto] <text>` - save first; optionally classify one task\n`{prefix}life inbox` / `{prefix}life tasks` - captures, tasks and confirmed actions\nThese commands also work in your DM. Life storage is currently owner-only.", inline=False)
         if is_bot_owner or is_administrator:

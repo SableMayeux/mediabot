@@ -10,6 +10,8 @@ import uuid
 
 import aiohttp
 
+from mediabot.services.ai_queue import InferenceQueue, QueueError
+
 MODEL = "llama3.2:3b-instruct-q4_K_M"
 MODEL_DIGEST = "sha256:a80c4f17acd55265feec403c7aef86be0c25983ab279d83f3bcd3abbcb5b8b72"
 DESKTOP_UNAVAILABLE_REASONS = {
@@ -73,6 +75,10 @@ class _ConversationProfileUnsupported(LocalAIError):
     """A legacy gateway definitively rejected the new field before inference."""
 
 
+class _NotAdmitted(LocalAIError):
+    """The gateway explicitly returned busy before starting inference."""
+
+
 def validate_endpoint(value):
     text = str(value or "")
     if not text:
@@ -129,6 +135,7 @@ class LocalAIService:
         self.token_path = Path(token_path or os.getenv("LOCAL_AI_TOKEN_PATH", "/run/secrets/local_ai_token"))
         self.session = None
         self._session_lock = asyncio.Lock()
+        self.queue = InferenceQueue()
 
     @property
     def enabled(self):
@@ -158,18 +165,18 @@ class LocalAIService:
             self.session = None
 
     async def request(self, route, payload):
-        if route not in {"/v1/chat", "/v1/cancel", "/v1/server-mode"}:
+        if route not in {"/v1/chat", "/v1/cancel", "/v1/finish", "/v1/server-mode"}:
             raise LocalAIError("Unsupported local model request.")
         await self.start()
         try:
             options = {"json": payload, "allow_redirects": False}
             if payload.get("profile") == "conversation":
-                options["timeout"] = aiohttp.ClientTimeout(total=500)
+                options["timeout"] = aiohttp.ClientTimeout(total=1530)
             async with self.session.post(self.base_url + route, **options) as response:
                 raw = bytearray()
                 async for chunk in response.content.iter_chunked(8192):
                     raw.extend(chunk)
-                    if len(raw) > 65536:
+                    if len(raw) > 524288:
                         raise LocalAIError("Local model returned an oversized response.")
                 body = json.loads(raw)
                 if not isinstance(body, dict):
@@ -178,8 +185,8 @@ class LocalAIService:
                     return body
                 if response.status != 200 or route == "/v1/cancel":
                     code = str(body.get("error", ""))
-                    if response.status == 429:
-                        raise LocalAIError("The local model is handling another request. Try again shortly.")
+                    if response.status == 429 and code == "busy":
+                        raise _NotAdmitted("Waiting for the current AI request to finish.")
                     if response.status == 409 and code == "cancelled":
                         raise LocalAIError("Local generation cancelled.")
                     if code in {"gpu_or_memory_busy", "foreign_gpu_workload", "gpu_vram_low", "gpu_temperature", "host_memory_low"}:
@@ -250,7 +257,44 @@ class LocalAIService:
             raise LocalAIError("The gateway returned an invalid quality-switch receipt.")
         return body
 
-    async def chat(self, request_id, messages, *, profile="structured", evidence=None, allowed_backends=("server",)):
+    async def chat(self, request_id, messages, *, profile="structured", evidence=None,
+                   allowed_backends=("server",), owner_id=None, on_progress=None, authorize=None):
+        validate_identity(request_id)
+        try:
+            async with self.queue.slot(request_id, owner_id=owner_id, on_progress=on_progress) as ticket:
+                deadline = asyncio.get_running_loop().time() + self.queue.wait_seconds
+                while True:
+                    ticket.check()
+                    # Permissions can change during a long queue wait. Routing is
+                    # selected by the gateway only after this fresh authorization.
+                    if authorize:
+                        allowed_backends = await authorize()
+                    ticket.check()
+                    if on_progress:
+                        await on_progress("model", 0)
+                    ticket.check()
+                    ticket.dispatched = True
+                    try:
+                        return await self._chat(request_id, messages, profile=profile,
+                            evidence=evidence, allowed_backends=allowed_backends)
+                    except _NotAdmitted:
+                        # This is the sole busy retry: 429/busy guarantees no
+                        # inference started. Never replay a timeout or disconnect.
+                        ticket.dispatched = False
+                        if asyncio.get_running_loop().time() >= deadline:
+                            raise QueueError("The AI gateway remained busy for an hour. No inference was submitted.")
+                        if on_progress:
+                            await on_progress("queued", 1)
+                        ticket.changed.clear()
+                        ticket.check()
+                        try:
+                            await asyncio.wait_for(ticket.changed.wait(), 2)
+                        except asyncio.TimeoutError:
+                            pass
+        except QueueError as exc:
+            raise LocalAIError(str(exc)) from exc
+
+    async def _chat(self, request_id, messages, *, profile="structured", evidence=None, allowed_backends=("server",)):
         validate_identity(request_id)
         if profile not in ("structured", "conversation"):
             raise LocalAIError("Unsupported generation profile.")
@@ -317,7 +361,22 @@ class LocalAIService:
 
     async def cancel(self, request_id):
         validate_identity(request_id)
+        if self.queue.cancel_waiting(request_id):
+            return {"request_id": request_id, "cancel_requested": True, "active": False}
         body = await self.request("/v1/cancel", {"request_id": request_id})
         if body.get("request_id") != request_id or body.get("cancel_requested") is not True or not isinstance(body.get("active"), bool):
             raise LocalAIError("The local model returned a mismatched cancellation receipt.")
+        return body
+
+    async def finish(self, request_id):
+        validate_identity(request_id)
+        ticket = next((item for item in self.queue.tickets if item.request_id == request_id), None)
+        if ticket and not ticket.dispatched:
+            raise LocalAIError("Your request is still queued. Finish sooner becomes available once generation starts.")
+        body = await self.request("/v1/finish", {"request_id": request_id})
+        if (body.get("request_id") != request_id or type(body.get("finish_requested")) is not bool
+                or type(body.get("active")) is not bool):
+            raise LocalAIError("The gateway returned an invalid finish-sooner receipt.")
+        if not body["finish_requested"]:
+            raise LocalAIError("Finish sooner is available during server generation. This request has already finished or is using the desktop worker.")
         return body
