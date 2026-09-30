@@ -11,6 +11,7 @@ speaker playback. These remain separate accounts and permission systems.
 - Music library: existing NAS music mounted read-only at `/music`
 - Denny's music controls: `media_player.dennys_2`, from Music Assistant
 - Denny's existing Cast entity: `media_player.dennys`
+- Denny's touch dashboard: `homelab-dashboard/dennys`
 
 Open **Play music**, select **Denny's**, then choose a track or album. Use the
 queue to add more songs. The Home dashboard provides playback, volume and stop
@@ -41,10 +42,41 @@ push. The browser and music player work without that enrollment.
 ## Denny's display and voice
 
 Music playback uses Google Cast and is separate from casting an HA dashboard.
-The latter needs a reachable, trusted HTTPS HA URL. The prepared private TLS
-proxy still needs a scoped DNS credential before it can be activated. The HA
-dashboard has not been made public and the Nest Hub firmware has not changed.
-Its microphone continues to use Google's voice service. Local Assist/voice
+The private HTTPS proxy is live at `https://ha.2-msb.com:8444`, listening only
+on the MediaServer LAN address. Its trusted certificate renews through a
+Cloudflare token restricted to this zone's DNS controls. Native HA login and
+authenticated WebSockets are required. There is no public HA tunnel or port
+forward. The Nest Hub firmware has not changed.
+
+Denny's has displayed the dashboard, confirmed on the physical screen. Its
+separate touch view provides **Shuffle music**, **Quiet volume**, **Normal
+volume** and the shopping list. Shuffle starts a fresh random queue of twenty
+tracks from the existing music library. For a particular song or album, open
+Music Assistant on a phone or computer, select Denny's, and choose the music.
+
+The device runs one Cast application at a time. Playing music replaces the
+dashboard with Music Assistant's player. The **Return Home when music stops**
+automation waits for idle playback, then restores the touch view. It skips
+active and paused music. The browser dashboard includes a **Show Home on
+Denny's** button and a toggle for that automation. Showing Home manually
+replaces the current Cast application.
+
+Shuffle has started real playback from a physical touchscreen tap. Volume,
+pause and resume have passed direct HA action checks. The Cast touch view
+uses the compatible `call-service` button format. Physical volume taps remain
+separate from the API checks. If a button appears but does nothing on the
+Nest, test its actual action from the browser and check the Cast frontend's
+support for that card and action format.
+
+The AmpliFi Alien currently returns an empty DNS answer for the private HA
+hostname, while Google and Cloudflare resolve it correctly. Denny's can reach
+the HTTPS origin through public DNS. Continue using the LAN Home link above
+for ordinary browsers while the router DNS issue remains unresolved.
+AmpliFi's [DNS troubleshooting guide](https://help.amplifi.com/hc/en-us/articles/360015273534-Troubleshooting-DNS-Issues)
+documents **Bypass DNS Cache** in its web interface. This affects router DNS
+handling across the network; it is not a hostname-specific exception.
+
+The microphone continues to use Google's voice service. Local Assist/voice
 requires its own hardware or integration setup.
 
 ## External monitoring
