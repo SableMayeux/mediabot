@@ -82,6 +82,7 @@ copy with their own application and services.
 - [Install, configure, update, back up and troubleshoot](docs/INSTALL.md)
 - [Member and administrator walkthrough](docs/USAGE.md)
 - [Full command and integration reference](docs/REFERENCE.md)
+- [Current homelab feature status and remaining work](docs/STATUS.md)
 - [Provider boundaries and architecture](mediabot/ARCHITECTURE.md)
 - [Roadmap](ROADMAP.md), [changelog](CHANGELOG.md) and [security policy](SECURITY.md)
 
