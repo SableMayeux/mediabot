@@ -220,6 +220,8 @@ health snapshots, recovery bundles or provider credentials. Do not `source`
 | Local AI gateway | `LOCAL_AI_URL`, `LOCAL_AI_TOKEN_PATH`. Requires its own bounded authenticated gateway and model service; these are not Ollama API settings. |
 | Web search | `WEB_SEARCH_URL`. Optional private SearXNG JSON search endpoint, commissioned separately. The bot retrieves bounded public web evidence without search-provider credentials or model action tools. |
 | Torrent gateway | `TORRENT_INTAKE_URL`, `TORRENT_INTAKE_TOKEN_PATH`. Requires the matching narrow gateway and its VPN/quarantine/review services. Do not substitute qBittorrent's admin URL. |
+| Personal home links | `MUSIC_ASSISTANT_PUBLIC_URL`, `HOME_ASSISTANT_PUBLIC_URL`. Optional link buttons; HA is shown only to the bot owner. These do not grant access to those services. |
+| HA notifications | `HOME_ASSISTANT_NOTIFY_WEBHOOK`. Optional private-IP `/api/webhook/` URL for a dedicated local-only notification automation. No HA admin token is used. See [Home setup](HOME.md). |
 
 Blank optional provider URL/key pairs leave those integrations disabled. Merely
 setting a gateway URL does not create its Docker network or mount its token.

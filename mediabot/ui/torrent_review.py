@@ -9,6 +9,7 @@ import math
 from typing import Any
 
 import discord
+from discord.ext.commands import CheckFailure
 
 from mediabot.services.torrent_intake import TorrentIntakeError, TorrentInputError
 
@@ -44,10 +45,11 @@ async def review_role(bot, user) -> str | None:
 class TorrentReviewView(discord.ui.View):
     """One actor-bound private session; approval always revalidates on server."""
 
-    def __init__(self, *, bot, service, actor_id: int, guild_id: int, role: str):
+    def __init__(self, *, bot, service, actor_id: int, guild_id: int, role: str, authorize=None):
         super().__init__(timeout=300)
         self.bot, self.service = bot, service
         self.actor_id, self.guild_id, self.role = actor_id, guild_id, role
+        self.authorize = authorize
         self.status: dict[str, Any] = {}
         self.items: list[dict[str, Any]] = []
         self.selected: set[int] = set()
@@ -65,7 +67,11 @@ class TorrentReviewView(discord.ui.View):
         )
 
     async def interaction_check(self, interaction):
-        role = await review_role(self.bot, interaction.user)
+        try:
+            role = await self.authorize(interaction.user) if self.authorize else await review_role(self.bot, interaction.user)
+        except CheckFailure as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return False
         if (interaction.user.id != self.actor_id or interaction.guild_id != self.guild_id
                 or role is None or (self.role == "owner" and role != "owner")):
             await interaction.response.send_message("This private review belongs to its authorized reviewer.", ephemeral=True)
@@ -360,10 +366,12 @@ class TorrentReviewView(discord.ui.View):
 class TorrentReviewLauncher(discord.ui.View):
     """Public, hash-free launcher; all names and manifests stay private."""
 
-    def __init__(self, *, bot, service, guild_id, info_hash=None):
-        super().__init__(timeout=300)
+    def __init__(self, *, bot, service, guild_id, info_hash=None, authorize=None):
+        super().__init__(timeout=None)
         self.bot, self.service, self.guild_id, self.info_hash = bot, service, guild_id, info_hash
+        self.authorize = authorize
         self.message = None
+        self.children[0].custom_id = f"torrent-review:{info_hash or 'queue'}"
 
     async def on_timeout(self):
         if self.message:
@@ -372,12 +380,16 @@ class TorrentReviewLauncher(discord.ui.View):
 
     @discord.ui.button(label="Review privately", style=discord.ButtonStyle.primary)
     async def launch(self, interaction, button):
-        role = await review_role(self.bot, interaction.user)
+        try:
+            role = await self.authorize(interaction.user) if self.authorize else await review_role(self.bot, interaction.user)
+        except CheckFailure as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
         if interaction.guild_id != self.guild_id or role is None:
             await interaction.response.send_message("An owner or administrator must review this download.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
-        view = TorrentReviewView(bot=self.bot, service=self.service, actor_id=interaction.user.id, guild_id=self.guild_id, role=role)
+        view = TorrentReviewView(bot=self.bot, service=self.service, actor_id=interaction.user.id, guild_id=self.guild_id, role=role, authorize=self.authorize)
         view.interaction = interaction
         try:
             await view.load(self.info_hash)

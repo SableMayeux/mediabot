@@ -178,10 +178,10 @@ class AdminDMTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(app.commands.CheckFailure):
             await app.admin_users.can_run(self.ctx())
 
-    async def test_media_commands_still_reject_dm(self):
+    async def test_media_commands_allow_current_owner_in_dm(self):
         for command in ("request", "discover", "music", "torrent"):
-            with self.subTest(command=command), self.assertRaises(app.commands.NoPrivateMessage):
-                await app.enforce_allowed_guild(self.ctx(command))
+            with self.subTest(command=command):
+                self.assertTrue(await app.enforce_allowed_guild(self.ctx(command)))
 
     async def test_exact_target_member_resolution_is_scoped_and_fresh(self):
         target = self.guilds[10].add_member(77, "Exact User", global_name="Global Label")

@@ -1,0 +1,25 @@
+name: External homelab watchdog
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+permissions:
+  contents: read
+  issues: write
+concurrency:
+  group: external-homelab-watchdog
+  cancel-in-progress: false
+jobs:
+  probe:
+    if: vars.HOMELAB_MONITOR_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Check endpoints and report incident transitions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          MEDIA_HEALTH_URL: ${{ vars.HOMELAB_MEDIA_HEALTH_URL }}
+          REQUESTS_HEALTH_URL: ${{ vars.HOMELAB_REQUESTS_HEALTH_URL }}
+        run: python3 scripts/external_watchdog.py

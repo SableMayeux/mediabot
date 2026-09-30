@@ -9,6 +9,7 @@ import re
 import secrets
 import signal
 import time
+import copy
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
@@ -79,6 +80,10 @@ from mediabot.services.local_ai import LocalAIService
 from mediabot.services.ai_access import AIAccessService, CAPABILITIES, PermissionBoundServerAI
 from mediabot.services.web_search import WebSearchService
 from mediabot.services.chat_access import allowed_chat_user
+from mediabot.services.media_access import media_scope
+from mediabot.services.home_notifications import notify_home
+from mediabot.ui.personal_home import HomeView
+from mediabot.services.group_picks import rank_movies
 from mediabot.ui.local_ai import LocalChatView, append_prompt, conversation_embed, parse_ask_options
 from mediabot.ui.life_auto import promote_automatically
 from mediabot.services.local_ai import LocalAIError
@@ -158,8 +163,10 @@ PREFIX = "$"
 
 OWNER_DM_COMMANDS = frozenset({"think", "life"})
 ADMIN_DM_GUILDS = {}
+MEDIA_DM_GUILDS = {}
+MEDIA_DM_COMMANDS = frozenset({"home", "server", "requests", "downloads", "tonight", "request", "discover", "recommend", "rate", "status", "music", "report", "new", "whoami", "torrent", "version", "ping"})
 
-BOT_VERSION = "2.10.0"
+BOT_VERSION = "2.11.0"
 
 # discord.py normally wraps non-successful API responses in HTTPException, but
 # aiohttp connection failures can escape directly before Discord returns a
@@ -524,19 +531,26 @@ async def enforce_allowed_guild(ctx):
     # owner checks or argument handling can reject the invocation and leave the
     # source message sitting in a public channel.
     if command_name == "torrent":
-        if ctx.guild is None:
-            raise commands.NoPrivateMessage()
-        deleted = await delete_message_safely(
-            ctx.message,
-            label="sensitive torrent intake command",
-        )
-        if not deleted:
-            raise commands.CheckFailure(
-                "I could not securely remove the magnet message, so nothing was queued."
+        if ctx.guild is not None:
+            deleted = await delete_message_safely(
+                ctx.message,
+                label="sensitive torrent intake command",
             )
+            if not deleted:
+                raise commands.CheckFailure(
+                    "I could not securely remove the magnet message, so nothing was queued."
+                )
         setattr(ctx, "_torrent_source_deleted", True)
 
     if ctx.guild is None:
+        if command_name in MEDIA_DM_COMMANDS:
+            if command_name == "server":
+                return True  # The selection command verifies its explicit target.
+            scope = await media_scope(bot, ctx.author, ALLOWED_GUILD_IDS, MEDIA_DM_GUILDS)
+            ctx._media_guild, ctx._media_member = scope
+            if command_name not in {"home", "whoami", "version", "ping"} and not await bot.is_owner(ctx.author) and not get_link(ctx.author.id):
+                raise commands.CheckFailure("Your Discord account needs a Seerr link. Ask an administrator to link it, then run `$home`.")
+            return True
         if command_name == "admin" or command_name.startswith("admin "):
             # Every admin command has a separate current-member/admin check.
             # DM transport alone never grants a guild or owner capability.
@@ -1219,6 +1233,16 @@ def touch_transient_message(message):
 
 async def renew_transient_interaction(interaction, message):
     """Renew a live card or reject a click once expiry owns the card."""
+
+    if getattr(interaction, "guild_id", None) is None and isinstance(interaction, discord.Interaction):
+        try:
+            await media_scope(bot, interaction.user, ALLOWED_GUILD_IDS, MEDIA_DM_GUILDS)
+            if not get_link(interaction.user.id) and not await bot.is_owner(interaction.user):
+                raise commands.CheckFailure("Your media account is no longer linked.")
+        except commands.CheckFailure as exc:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(str(exc), ephemeral=True)
+            return False
 
     if touch_transient_message(message):
         return True
@@ -5593,7 +5617,15 @@ class ReportCategoryView(LoggedView):
             await interaction.response.send_message(str(exc), ephemeral=True)
             return
 
-        if interaction.guild_id is None or interaction.channel_id is None:
+        report_guild_id = interaction.guild_id
+        if report_guild_id is None:
+            try:
+                report_scope = await media_scope(bot, interaction.user, ALLOWED_GUILD_IDS, MEDIA_DM_GUILDS)
+                report_guild_id = report_scope[0].id
+            except commands.CheckFailure as exc:
+                await interaction.response.send_message(str(exc), ephemeral=True)
+                return
+        if interaction.channel_id is None:
             await interaction.response.send_message(
                 "Reports must be submitted inside the media server.",
                 ephemeral=True,
@@ -5619,7 +5651,7 @@ class ReportCategoryView(LoggedView):
                 category=normalized_category.value,
                 details=details,
                 reporter_discord_id=interaction.user.id,
-                discord_guild_id=interaction.guild_id,
+                discord_guild_id=report_guild_id,
                 discord_channel_id=interaction.channel_id,
                 discord_message_id=self.message.id,
             )
@@ -8693,6 +8725,11 @@ async def send_jellyfin_availability_notification(
         seerr_request_id=int(record["seerr_request_id"]),
         discord_message_id=int(notification.id),
     )
+    if requester_id == bot.owner_id:
+        try:
+            await notify_home(f"request_{int(record['seerr_request_id'])}", "Ready to watch", f"{record['title']} is available in Jellyfin. Open Watch something on your Home dashboard.")
+        except Exception as exc:
+            logger.warning("Home availability notification unavailable: %s", type(exc).__name__)
     return notification
 
 
@@ -9566,6 +9603,19 @@ async def on_ready():
         event_lifecycle_watcher.start()
     if not runtime_health_watcher.is_running():
         runtime_health_watcher.start()
+    if not torrent_queue_watcher.is_running():
+        torrent_queue_watcher.start()
+    try:
+        with db() as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS torrent_owner_cards (info_hash TEXT PRIMARY KEY, state_key TEXT NOT NULL, channel_id INTEGER NOT NULL, message_id INTEGER NOT NULL)")
+            saved_cards = conn.execute("SELECT info_hash, message_id FROM torrent_owner_cards").fetchall()
+        async def authorize_owner(user):
+            await media_scope(bot, user, ALLOWED_GUILD_IDS, MEDIA_DM_GUILDS)
+            return "owner" if await bot.is_owner(user) else None
+        for card in saved_cards:
+            bot.add_view(TorrentReviewLauncher(bot=bot, service=torrent_intake, guild_id=None, info_hash=card['info_hash'], authorize=authorize_owner), message_id=card['message_id'])
+    except Exception as exc:
+        log_exception("Could not restore private torrent queue controls", exc)
     try:
         registered = register_persistent_event_dashboards()
         if registered:
@@ -9803,7 +9853,7 @@ async def mediabot_help(
             getattr(check, '__qualname__', '') == 'is_owner.<locals>.predicate'
             for node in lineage for check in node.checks)
     if ctx.guild is None:
-        dm_commands = {"help", "ask"} | (OWNER_DM_COMMANDS if is_bot_owner else set())
+        dm_commands = {"help", "ask"} | MEDIA_DM_COMMANDS | (OWNER_DM_COMMANDS if is_bot_owner else set())
         if is_administrator:
             dm_commands |= {command.qualified_name for command in bot.walk_commands()
                             if (command.qualified_name == "admin" or command.qualified_name.startswith("admin "))
@@ -9822,6 +9872,12 @@ async def mediabot_help(
             await ctx.reply(description)
             return
         lines = [f"`{prefix}ask [--desktop|--server] [--web] <question>` - chat here in DM; select a GPU and optionally retrieve web sources",
+                 f"`{prefix}home` - your personal screen: requests, watch picks, ratings and reports",
+                 f"`{prefix}requests` / `{prefix}request <title>` / `{prefix}status <title or #ID>` - your media requests",
+                 f"`{prefix}discover` / `{prefix}recommend` / `{prefix}tonight [@members] [--under 120]` - watch picks",
+                 f"`{prefix}rate` / `{prefix}report <title>` / `{prefix}music <track>` / `{prefix}whoami` - ratings, reports, music and identity",
+                 f"`{prefix}torrent <type> <magnet>` - private intake; owner/admin approval remains required",
+                 f"`{prefix}server <server ID>` - select your server when you belong to several",
                  f"`{prefix}help <command>` - command details"]
         if is_bot_owner:
             lines += [f"`{prefix}think [--auto] <text>` - save your private raw capture; --auto attempts one source-quoted task",
@@ -9835,7 +9891,7 @@ async def mediabot_help(
                           f"`{prefix}admin integrations` / `{prefix}admin logs` / `{prefix}admin errors` - private diagnostics",
                           f"`{prefix}admin ai` - backend status and persistent user access"]
         embed = discord.Embed(title="MediaBot in DMs", description="\n".join(lines), color=discord.Color.blurple())
-        embed.add_field(name="In the server", value="`$ask` answers in the channel. `$ask --private <question>` moves the answer to a DM. `$recommend --auto` optionally ranks provider suggestions with the local model. Media commands and torrent review currently require the configured server; an account link does not enable them in DMs.", inline=False)
+        embed.add_field(name="Your private media workspace", value="Media commands work here with a linked account and current server membership. `$home` opens your personal controls. Event administration and shared ballots stay in the server. `$ask --private` moves a public AI request here.", inline=False)
         embed.add_field(name="AI routing and search", value="`--desktop` requires the desktop with no server fallback. `--server` uses only the server. Omit both to prefer a ready, permitted desktop with permitted server fallback. Follow-ups keep that selection and web mode. `--web` searches the current question and shows sources. `--private` controls Discord delivery, not search-provider privacy.", inline=False)
         embed.add_field(name="Waiting and answer controls", value="Busy requests queue automatically and answer here when ready. Cancel generation removes a queued request or stops an active one. Finish sooner requests a compact answer during server generation. Conversation context expires ten minutes after the answer finishes.", inline=False)
         await ctx.reply(embed=embed)
@@ -9959,6 +10015,9 @@ async def mediabot_help(
 
     if normalized_topic == "advanced":
         utility_lines = [
+            f"`{prefix}home` - your private media home screen",
+            f"`{prefix}requests` / `{prefix}downloads` - your requests and magnet progress",
+            f"`{prefix}tonight [@members] [--under 120]` - playable group movie picks",
             f"`{prefix}new` - recently added media",
             f"`{prefix}whoami` - linked request identity",
             f"`{prefix}ping` - connection latency",
@@ -9986,6 +10045,7 @@ async def mediabot_help(
         return
 
     if normalized_topic != "all":
+        embed.add_field(name="Your personal media home", value=f"`{prefix}home` - private buttons for requests, watch picks, ratings and reports\n`{prefix}requests` / `{prefix}downloads` - your tracked progress\n`{prefix}tonight [@members] [--under 120]` - three playable movie picks\nMedia commands work in DMs after account linking and current server membership checks.", inline=False)
         embed.add_field(name="Local conversation", value=f"`{prefix}ask <question>` - answer here with automatic GPU selection\n`{prefix}ask --desktop <question>` - desktop only, no server fallback\n`{prefix}ask --server <question>` - server only\nAdd `--web` for cited sources or `--private` for DM delivery, before the question. GPU selection never grants access. Busy requests queue automatically. Cancel removes a queued request or stops generation; Finish sooner requests a compact server answer. Follow-ups keep your GPU selection and web mode.", inline=False)
         if is_bot_owner:
             embed.add_field(name="Your private Life workspace", value=f"`{prefix}think [--auto] <text>` - save first; optionally classify one task\n`{prefix}life inbox` / `{prefix}life tasks` - captures, tasks and confirmed actions\nThese commands also work in your DM. Life storage is currently owner-only.", inline=False)
@@ -10320,13 +10380,16 @@ async def life(ctx, section: str = "inbox"):
 )
 async def torrent(ctx, category: str = "", *, magnet: str = ""):
     guild_message = ctx.guild is not None
-    if not guild_message or not getattr(ctx, "_torrent_source_deleted", False):
+    if not getattr(ctx, "_torrent_source_deleted", False):
         return
+    async def authorize_reviewer(user):
+        scope = await media_scope(bot, user, ALLOWED_GUILD_IDS, MEDIA_DM_GUILDS, guild_id=getattr(ctx.guild, "id", None))
+        return "owner" if await bot.is_owner(user) else "admin" if scope[1].guild_permissions.administrator else None
     if category.strip().casefold() == "review" and not magnet.strip():
-        if await review_role(bot, ctx.author) is None:
-            await ctx.send("An owner or administrator must review downloads.", delete_after=30)
+        if await authorize_reviewer(ctx.author) is None:
+            await ctx.send("An owner or administrator must review downloads.")
             return
-        view = TorrentReviewLauncher(bot=bot, service=torrent_intake, guild_id=ctx.guild.id)
+        view = TorrentReviewLauncher(bot=bot, service=torrent_intake, guild_id=getattr(ctx.guild, "id", None), authorize=authorize_reviewer)
         message = await ctx.send("Open the private torrent review queue.", view=view)
         view.message = message
         register_transient_card(message=message, command_message=None, kind="torrent-review")
@@ -10366,6 +10429,9 @@ async def torrent(ctx, category: str = "", *, magnet: str = ""):
         return
 
     media_label = torrent_category_label(result.category)
+    with db() as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS personal_torrents (info_hash TEXT NOT NULL, discord_user_id INTEGER NOT NULL, summary TEXT NOT NULL DEFAULT '{}', PRIMARY KEY(info_hash, discord_user_id))")
+        conn.execute("INSERT OR IGNORE INTO personal_torrents(info_hash, discord_user_id) VALUES (?,?)", (result.info_hash, ctx.author.id))
     if result.duplicate:
         if torrent_category_requires_manual_review(result.category):
             confirmation = (
@@ -10392,11 +10458,82 @@ async def torrent(ctx, category: str = "", *, magnet: str = ""):
         )
     if torrent_category_requires_manual_review(result.category):
         view = TorrentReviewLauncher(
-            bot=bot, service=torrent_intake, guild_id=ctx.guild.id, info_hash=result.info_hash,
+            bot=bot, service=torrent_intake, guild_id=getattr(ctx.guild, "id", None), info_hash=result.info_hash, authorize=authorize_reviewer,
         )
         view.message = await send(confirmation, view=view)
     else:
         await send(confirmation)
+
+
+@tasks.loop(seconds=45)
+async def torrent_queue_watcher():
+    """Durable owner notifications for manual WebUI and bot intake alike."""
+    if not torrent_intake.enabled:
+        return
+    try:
+        if not bot.owner_id:
+            await bot.is_owner(bot.user)
+        identity = bot.owner_id
+        if not identity:
+            return
+        payload = await torrent_intake.review_request("list", actor_id=identity, actor_role="owner")
+        with db() as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS torrent_owner_cards (info_hash TEXT PRIMARY KEY, state_key TEXT NOT NULL, channel_id INTEGER NOT NULL, message_id INTEGER NOT NULL)")
+            conn.execute("CREATE TABLE IF NOT EXISTS personal_torrents (info_hash TEXT NOT NULL, discord_user_id INTEGER NOT NULL, summary TEXT NOT NULL DEFAULT '{}', PRIMARY KEY(info_hash, discord_user_id))")
+            conn.execute("CREATE TABLE IF NOT EXISTS home_download_notifications (info_hash TEXT PRIMARY KEY, stage TEXT NOT NULL)")
+        owner = await bot.fetch_user(identity)
+        for item in payload.get("items", []):
+            digest = item['info_hash']
+            with db() as conn:
+                conn.execute("UPDATE personal_torrents SET summary=? WHERE info_hash=?", (json.dumps(item), digest))
+            stage = item.get("stage") or ("Review needed" if not item.get("approved") else "Downloading")
+            if stage in {"Review needed", "Waiting for metadata review", "Security hold", "Ready to collect", "Ready, some files unscanned", "Scan failed, review required"}:
+                with db() as conn:
+                    last_notification = conn.execute("SELECT stage FROM home_download_notifications WHERE info_hash=?", (digest,)).fetchone()
+                if last_notification is None or last_notification['stage'] != stage:
+                    try:
+                        sent = await notify_home(f"torrent_{digest}", stage,
+                            f"{item['name']}. Open your MediaBot DM review card for file selection, approval, scan coverage and the download folder.")
+                        if sent:
+                            with db() as conn:
+                                conn.execute("INSERT INTO home_download_notifications VALUES (?,?) ON CONFLICT(info_hash) DO UPDATE SET stage=excluded.stage", (digest, stage))
+                    except Exception as exc:
+                        logger.warning("Home download notification unavailable: %s", type(exc).__name__)
+            state_key = f"{stage}:{int(float(item.get('progress', 0)) * 20)}:{','.join(item.get('reason_codes', []))}"
+            with db() as conn:
+                existing = conn.execute("SELECT * FROM torrent_owner_cards WHERE info_hash=?", (digest,)).fetchone()
+            if existing and existing['state_key'] == state_key:
+                continue
+            embed = discord.Embed(title="Your download queue", description=f"**{discord.utils.escape_markdown(str(item['name']))[:200]}**\n{stage}", color=discord.Color.gold())
+            embed.add_field(name="Progress", value=f"{float(item.get('progress', 0)):.1%} | {item.get('state', 'unknown')}")
+            embed.add_field(name="Next step", value="Open Review privately to inspect files, approve a download, or refresh its progress.", inline=False)
+            if item.get('reason_codes'):
+                embed.add_field(name="Hold reason", value=", ".join(item['reason_codes'])[:1000], inline=False)
+            if item.get('save_path'):
+                embed.add_field(name="Location", value=f"`{item['save_path']}`", inline=False)
+            async def authorize(user):
+                await media_scope(bot, user, ALLOWED_GUILD_IDS, MEDIA_DM_GUILDS)
+                return "owner" if await bot.is_owner(user) else None
+            view = TorrentReviewLauncher(bot=bot, service=torrent_intake, guild_id=None, info_hash=digest, authorize=authorize)
+            channel = await owner.create_dm()
+            message = None
+            if existing:
+                try:
+                    old = await channel.fetch_message(existing['message_id'])
+                    message = await old.edit(embed=embed, view=view)
+                except discord.NotFound:
+                    pass
+            if message is None:
+                message = await channel.send(embed=embed, view=view)
+            with db() as conn:
+                conn.execute("INSERT INTO torrent_owner_cards VALUES (?,?,?,?) ON CONFLICT(info_hash) DO UPDATE SET state_key=excluded.state_key, channel_id=excluded.channel_id, message_id=excluded.message_id", (digest, state_key, channel.id, message.id))
+    except Exception as exc:
+        logger.warning("Torrent queue notification unavailable: %s", type(exc).__name__)
+
+
+@torrent_queue_watcher.before_loop
+async def before_torrent_queue_watcher():
+    await bot.wait_until_ready()
 
 
 async def send_private_output(
@@ -10438,6 +10575,133 @@ async def send_private_output(
     if ctx.guild is not None and public_success:
         await ctx.reply(public_success, delete_after=15)
     return True
+
+
+@bot.command(name="server", help="Choose a configured server for your personal DM: $server <server ID>.")
+async def personal_server(ctx, identity: int):
+    scope = await media_scope(bot, ctx.author, ALLOWED_GUILD_IDS, {}, guild_id=identity)
+    MEDIA_DM_GUILDS[ctx.author.id] = scope[0].id
+    await ctx.reply(f"Your personal DM now uses **{discord.utils.escape_markdown(scope[0].name)}**. Membership is checked on each action.")
+
+
+@bot.command(name="home", help="Open your private MediaBot home screen with requests, watch picks, ratings and reports.")
+async def personal_home(ctx):
+    target = ctx
+    if ctx.guild is not None:
+        channel = await ctx.author.create_dm()
+        target = copy.copy(ctx)
+        target.channel = channel
+        # Context.guild is derived from its message. Fetch a real DM message so
+        # command checks and receipts retain their actual private transport.
+        target.message = await channel.send("Your personal MediaBot home screen")
+        target.__dict__["author"] = ctx.author
+        target.__dict__.pop("guild", None)
+        MEDIA_DM_GUILDS[ctx.author.id] = ctx.guild.id
+    async def authorize():
+        return await media_scope(bot, target.author, ALLOWED_GUILD_IDS, MEDIA_DM_GUILDS)
+    async def dispatch(name, value):
+        from discord.ext.commands.view import StringView
+        command = bot.get_command(name)
+        action = copy.copy(target)
+        action.command, action.invoked_with = command, name
+        action.view = StringView(value)
+        action.args, action.kwargs = [], {}
+        try:
+            await command.invoke(action)
+        except commands.CommandError as exc:
+            await on_command_error(action, exc)
+    scope = await authorize()
+    link = get_link(ctx.author.id)
+    owner = await bot.is_owner(ctx.author)
+    embed = discord.Embed(title=f"Welcome, {ctx.author.display_name}",
+        description="What are we doing tonight?\nFind something to watch, request a title, or check what is happening with your downloads.", color=discord.Color.blurple())
+    embed.add_field(name="Your account", value=discord.utils.escape_markdown(link['seerr_username']) if link else "Awaiting a Seerr account link. Ask an administrator, then reopen `$home`.")
+    embed.add_field(name="Server", value=discord.utils.escape_markdown(scope[0].name))
+    embed.set_footer(text="This screen is yours. Run $home again whenever you need it.")
+    links = {"Jellyfin": os.environ.get("JELLYFIN_PUBLIC_URL", ""), "Music": os.environ.get("MUSIC_ASSISTANT_PUBLIC_URL", ""), "Home Assistant": os.environ.get("HOME_ASSISTANT_PUBLIC_URL", "") if owner else ""}
+    view = HomeView(ctx.author.id, authorize, dispatch, owner=owner,
+        review=owner or scope[1].guild_permissions.administrator, links=links)
+    await target.send(embed=embed, view=view)
+    if ctx.guild is not None:
+        await ctx.reply("Your personal home screen is in your DMs.", delete_after=15)
+
+
+@bot.command(name="requests", help="Show your own tracked movie, TV and music requests.")
+async def my_requests(ctx):
+    with db() as conn:
+        rows = [dict(row) for row in conn.execute("SELECT * FROM request_messages WHERE requester_discord_id=? ORDER BY updated_at DESC LIMIT 15", (ctx.author.id,))]
+        music_rows = [dict(row) for row in conn.execute("SELECT * FROM music_requests WHERE requester_discord_id=? ORDER BY updated_at DESC LIMIT 5", (ctx.author.id,))]
+    lines = [f"**{discord.utils.escape_markdown(str(row['title']))}**\n`$status #{row['seerr_request_id']}` | {'Ready in Jellyfin' if row['jellyfin_available'] else row['request_status'] or 'Awaiting update'}" for row in rows]
+    lines += [f"**{discord.utils.escape_markdown(str(row['display_query']))}** | {row['request_status']}" for row in music_rows]
+    embed = discord.Embed(title="My requests", description="\n\n".join(lines)[:4000] or "No tracked requests yet. Use `$request <title>` to start.", color=discord.Color.blurple())
+    if ctx.guild is not None:
+        await ctx.author.send(embed=embed)
+        await ctx.reply("Your request list is in your DMs.", delete_after=15)
+    else:
+        await ctx.reply(embed=embed)
+
+
+@bot.command(name="downloads", help="Privately show progress and blockers for magnets you submitted through MediaBot.")
+async def my_downloads(ctx):
+    with db() as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS personal_torrents (info_hash TEXT NOT NULL, discord_user_id INTEGER NOT NULL, summary TEXT NOT NULL DEFAULT '{}', PRIMARY KEY(info_hash, discord_user_id))")
+        rows = conn.execute("SELECT info_hash, summary FROM personal_torrents WHERE discord_user_id=? LIMIT 20", (ctx.author.id,)).fetchall()
+    lines = []
+    for row in rows:
+        item = json.loads(row['summary'])
+        name = discord.utils.escape_markdown(str(item.get('name') or row['info_hash'][:12]))
+        stage = item.get('stage') or "Accepted; waiting for the owner queue update"
+        lines.append(f"**{name[:180]}**\n{stage} | {float(item.get('progress', 0)):.1%}")
+    embed = discord.Embed(title="My downloads", description="\n\n".join(lines)[:4000] or "No magnets submitted from this account yet.", color=discord.Color.blurple())
+    embed.set_footer(text="Updates about every 45 seconds. Owner/admin review starts manual downloads. File size is unknown until metadata arrives.")
+    if ctx.guild is not None:
+        await ctx.author.send(embed=embed)
+        await ctx.reply("Your download progress is in your DMs.", delete_after=15)
+    else:
+        await ctx.reply(embed=embed)
+
+
+@bot.command(name="tonight", help="Pick three playable movies: $tonight [@members] [--under 120]. Use $tonight optin/optout to control group use of your ratings.")
+@commands.cooldown(2, 30, commands.BucketType.user)
+async def tonight(ctx, *, options: str = ""):
+    consent_action = options.strip().casefold() in {"optin", "optout"}
+    with db() as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS group_taste_consent (discord_user_id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL)")
+        if consent_action:
+            enabled = int(options.strip().casefold() == "optin")
+            conn.execute("INSERT INTO group_taste_consent VALUES (?,?) ON CONFLICT(discord_user_id) DO UPDATE SET enabled=excluded.enabled", (ctx.author.id, enabled))
+        opted_in = {row[0] for row in conn.execute("SELECT discord_user_id FROM group_taste_consent WHERE enabled=1")}
+    if consent_action:
+        await ctx.reply("Your ratings can inform group picks." if enabled else "Your ratings will only inform your own picks.")
+        return
+    limit_match = re.search(r"--under\s+(\d+)\b", options)
+    limit = int(limit_match.group(1)) if limit_match else 150
+    residual = re.sub(r"<@!?\d+>|--under\s+\d+", "", options).strip()
+    if residual or not 30 <= limit <= 300:
+        await ctx.reply("Use `$tonight [@members] [--under 120]`. Runtime must be 30 to 300 minutes.")
+        return
+    scope = await media_scope(bot, ctx.author, ALLOWED_GUILD_IDS, MEDIA_DM_GUILDS, guild_id=getattr(ctx.guild, "id", None))
+    identities = {ctx.author.id} | {int(value) for value in re.findall(r"<@!?(\d+)>", options)}
+    if len(identities) > 8:
+        await ctx.reply("Choose up to eight participants.")
+        return
+    for identity in identities:
+        await scope[0].fetch_member(identity)
+    profiles = [ratings_for_user(identity) for identity in sorted(identities) if identity == ctx.author.id or identity in opted_in]
+    if not jellyfin.enabled:
+        await ctx.reply("Jellyfin is not configured.")
+        return
+    async with ctx.typing():
+        catalog = await jellyfin.catalog(item_type="Movie", start_index=0, limit=5000, sort_by="CommunityRating", sort_order="Descending")
+        picks = rank_movies(catalog.get("Items", []), profiles, max_minutes=limit)
+    await ctx.reply(f"Three watch-now picks under {limit} minutes. Other participants' ratings are used only after `$tonight optin`. These are library matches, with no AI inference.")
+    if not picks:
+        await ctx.reply("No playable movies with a known runtime fit that limit.")
+    for item in picks:
+        shape, details = available_media_shape(item)
+        view = discord.ui.View(timeout=None)
+        view.add_item(discord.ui.Button(label="Watch in Jellyfin", url=jellyfin.watch_url(item['Id'])))
+        await ctx.reply(embed=build_media_embed(shape, details, heading="Tonight", state_text="Available in Jellyfin", color=discord.Color.green()), view=view)
 
 
 @bot.command()
@@ -13760,6 +14024,7 @@ async def main():
             transient_ui_cleanup_watcher,
             jellyfin_availability_watcher,
             event_lifecycle_watcher,
+            torrent_queue_watcher,
         ):
             if watcher.is_running():
                 watcher_task = watcher.get_task()

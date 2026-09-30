@@ -129,7 +129,7 @@ class PrivateLifeCommandTests(unittest.IsolatedAsyncioTestCase):
             await app.mediabot_help.callback(ctx)
             self.assertIn("$life tasks", str(ctx.reply.call_args.kwargs["embed"].to_dict()))
             await app.mediabot_help.callback(ctx, topic="torrent")
-            self.assertIn("only in the configured server", ctx.reply.call_args.args[0])
+            self.assertIn("Use `$torrent review`", ctx.reply.call_args.args[0])
 
     async def test_help_matches_auto_features_and_admin_owner_boundaries(self):
         ctx=self.context(SimpleNamespace(id=10))
@@ -149,7 +149,7 @@ class PrivateLifeCommandTests(unittest.IsolatedAsyncioTestCase):
             await app.mediabot_help.callback(ctx)
             rendered=str(ctx.reply.call_args.kwargs['embed'].to_dict())
             self.assertIn('--auto attempts one source-quoted task',rendered)
-            self.assertIn('currently require the configured server',rendered)
+            self.assertIn('Media commands work here with a linked account',rendered)
 
     async def test_complete_owner_help_fits_discord_embed_limits(self):
         ctx=self.context(SimpleNamespace(id=10))

@@ -113,13 +113,13 @@ class RuntimeHardeningTests(unittest.IsolatedAsyncioTestCase):
         ctx.send.assert_awaited_once_with(str(error))
         ctx.reply.assert_not_awaited()
 
-    async def test_torrent_is_not_accepted_in_direct_messages(self):
+    async def test_torrent_dm_requires_current_membership(self):
         ctx = SimpleNamespace(
             guild=None,
             author=SimpleNamespace(id=12),
             command=SimpleNamespace(qualified_name="torrent"),
         )
-        with self.assertRaises(app.commands.NoPrivateMessage):
+        with self.assertRaises(app.commands.CheckFailure):
             await app.enforce_allowed_guild(ctx)
 
     async def test_deleted_torrent_command_rejects_unlinked_user(self):

@@ -7,6 +7,38 @@ and this project uses semantic version numbers.
 
 ## [Unreleased]
 
+## [2.11.0] - 2026-09-29
+
+### Added
+
+- Personal `$home` DM screen with requests, discovery, ratings, reports, download
+  progress and optional music links. Media workflows now work in DMs after fresh
+  allowed-server membership and account checks. `$server <ID>` selects a scope
+  when a member belongs to several configured servers.
+- `$requests` and `$downloads` show only the requesting account's tracked records.
+- `$tonight [@members] [--under 120]` ranks actual playable library movies with a
+  known runtime. Other participants' ratings require their explicit
+  `$tonight optin`; `$tonight optout` revokes that preference.
+- Durable owner review cards for manual qBittorrent WebUI submissions and bot
+  magnets. Review buttons survive restarts and show approval, scan coverage,
+  blockers, progress and the actual download folder.
+- Optional scoped Home Assistant notification webhook and a configurable
+  external GitHub Actions watchdog that opens one incident until recovery.
+
+### Changed
+
+- Server and DM help describe the applicable personal workflows. Events remain
+  server-only and Life remains owner-only.
+- Review launchers remain available while individual private file-selection
+  sessions still expire. Each control checks current reviewer authorization.
+
+The homelab's separate torrent intake service now uses qBittorrent 5.2's native
+metadata-only reader before adding a magnet stopped in quarantine. The portable
+MediaBot installer does not provision that service or Music Assistant.
+Prefetched files are explicitly selected while stopped, and initial disk checks
+are allowed to settle before quarantine verification. This prevents cached
+metadata from producing a misleading zero-selected-byte completion.
+
 ## [2.10.0] - 2026-09-28
 
 ### Added

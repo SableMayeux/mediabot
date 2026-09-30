@@ -105,17 +105,31 @@ reopen an event without recreating its nominations and votes.
 
 ## Server messages and DMs
 
+Start your personal session with `$home` in a DM or server channel. In a server,
+the bot sends the home screen privately. Its buttons open the existing request,
+discovery, ratings and report workflows. `$requests` lists your tracked media
+requests; `$downloads` lists progress for magnets submitted from your account.
+If you belong to several configured servers, use `$server <server ID>` first.
+Membership is fetched again for each command and button. A server selection
+does not grant permissions and lasts until the bot restarts.
+
+`$tonight @friend --under 120` picks up to three movies already playable in the
+library, under the stated runtime. Your own ratings inform your picks. A friend
+must run `$tonight optin` before their ratings can inform a group choice, and can
+revoke it with `$tonight optout`. The result never exposes individual ratings or
+uses AI inference. Up to eight current server members can participate.
+
 | Command group | Server channel | Direct message to the bot |
 | --- | --- | --- |
 | `$help` | Yes, permission-aware command list | Yes, DM-specific command list |
-| Requests, discovery, ratings, status, music, reports, events, `$whoami` | Yes, with the required provider/account permissions | Not currently supported |
+| Home, requests, discovery, ratings, status, music, reports, `$whoami` | Yes, with the required provider/account permissions | Yes, with current allowed-server membership and account linking |
+| Events and ballots | Yes | Server-only |
 | `$ask` | Current allowed-server members and bot owner, if AI is configured | Same membership check, if AI is configured |
 | `$think`, `$capture`, `$life` | Bot owner, private workflow | Bot owner |
-| `$torrent` intake and review | Linked members for intake; owner/admin for review, if its gateway is configured | Not currently supported |
+| `$torrent` intake and review | Linked members for intake; owner/admin for review, if its gateway is configured | Same account and fresh reviewer checks |
 | `$admin` tools | Administrators; sensitive linking/diagnostics also require bot ownership | Same current-server permission requirements; select a server if needed |
 
-The different help lists reflect current permissions. A media account link does
-not enable media commands in DMs. Buttons usually belong to the person who
+The different help lists reflect current permissions. Buttons usually belong to the person who
 opened the card, so start your own command instead of using someone else's
 controls. Abandoned interactive cards expire after about five minutes; run the
 command again. Successful receipts and event dashboards remain.
@@ -148,9 +162,8 @@ not silently switch targets. The selected server determines the member
 lookup and report queue. The installation still shares one Seerr provider and
 account-link store across its trusted servers.
 
-Commands continue to work in the server as before. DM administration does not
-enable `$request`, `$status`, `$whoami`, media discovery, events or torrent
-commands in DMs. Use the server channel for those commands.
+Media commands also work in DMs after the normal membership and account checks.
+Event scheduling and ballots continue to use server channels.
 
 ## Optional local AI and Life
 
@@ -276,6 +289,13 @@ Home Assistant, voice devices and multi-user Life enrollment are not installed
 by the MediaBot setup script.
 
 ## Optional torrent workflow
+
+The owner receives a private review card for manual categories, including jobs
+added directly in qBittorrent's WebUI. Its launcher survives bot restarts. The
+actual file-selection session expires after five minutes; reopen the launcher
+to continue. `$torrent review` opens the whole queue. Approval never bypasses
+the VPN, hold evidence or post-completion scan. Partial scan coverage is shown
+explicitly. Manual downloads remain in their displayed quarantine folder.
 
 Torrent commands require an operator-provisioned VPN/quarantine gateway. The
 portable installer does not install qBittorrent, a VPN, a scanner or that gateway.

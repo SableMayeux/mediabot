@@ -4,7 +4,7 @@
 MediaBot connects your server to your existing media stack, with search cards,
 confirmation buttons, account-linked requests and progress receipts.
 
-Current source version: **2.10.0**. Get stable source releases and change notes from
+Current source version: **2.11.0**. Get stable source releases and change notes from
 [Releases](https://github.com/SableMayeux/mediabot/releases).
 
 ```text
@@ -14,6 +14,8 @@ $recommend --count 3            Find something new to request
 $status #123                    Check a tracked request
 $event                          Vote on the next media night
 $help                           See what your account can use
+$home                           Open your private media home screen
+$tonight --under 120             Pick three watch-now library movies
 ```
 
 ## Run it on your server
@@ -41,6 +43,9 @@ supplies the bot's Python 3.13 runtime.
 Once it is healthy, follow [Your first request](docs/USAGE.md#your-first-request)
 to link a Discord member to Seerr and submit a confirmed request. Give members
 [the user guide](docs/USAGE.md), not the installation checklist.
+
+For music playback and the Home Assistant companion dashboard, see
+[Music and Home Assistant](docs/HOME.md).
 
 Administrators can use `$admin` in the server or directly in the bot's DMs.
 Account linking still requires the bot owner, and the media account must exist
