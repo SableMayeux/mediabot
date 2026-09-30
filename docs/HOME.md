@@ -45,8 +45,11 @@ Music playback uses Google Cast and is separate from casting an HA dashboard.
 The private HTTPS proxy is live at `https://ha.2-msb.com:8444`, listening only
 on the MediaServer LAN address. Its trusted certificate renews through a
 Cloudflare token restricted to this zone's DNS controls. Native HA login and
-authenticated WebSockets are required. There is no public HA tunnel or port
-forward. The Nest Hub firmware has not changed.
+authenticated WebSockets are required. The proxy also rejects connections
+whose actual TCP peer is outside the LAN; forged forwarding headers do not
+grant access. The active Cloudflare tunnel has no HA route. The hostname's
+public DNS record resolves to a private LAN address. This is not a public
+Home Assistant URL. The Nest Hub firmware has not changed.
 
 Denny's has displayed the dashboard, confirmed on the physical screen. Its
 separate touch view provides **Shuffle music**, **Quiet volume**, **Normal
@@ -60,6 +63,22 @@ automation waits for idle playback, then restores the touch view. It skips
 active and paused music. The browser dashboard includes a **Show Home on
 Denny's** button and a toggle for that automation. Showing Home manually
 replaces the current Cast application.
+
+You can restore the screen without opening Home Assistant: DM MediaBot
+`$ha home`, or run `$home` and press **Show HA on Denny's**. Both controls
+are owner-only and work in the trusted Discord server as well. They explicitly
+stop Denny's music, close its current Cast application and launch a fresh HA
+view. Swiping back to Google's home screen does not stop music, so the idle
+automation may correctly leave playback alone. The bot reports that HA
+accepted the request; check the physical screen to confirm it appeared.
+
+The restore capability uses a separate local-only POST webhook. Its only
+action is the fixed Denny's restore script. MediaBot does not receive an HA
+administrator token or an arbitrary device/service control API. Other
+deployments can leave `HOME_ASSISTANT_CAST_WEBHOOK` unset. To enable it,
+create a local-only POST webhook automation for a fixed restore script, use
+a random 48-96 character webhook ID, and set its private-IP URL in the bot's
+environment. Never publish that URL or put it in a command argument.
 
 Shuffle has started real playback from a physical touchscreen tap. Volume,
 pause and resume have passed direct HA action checks. The Cast touch view
@@ -92,6 +111,14 @@ The checks transmit no API keys, private LAN addresses or torrent names. A
 failed probe establishes endpoint failure, not which WAN/tunnel/app layer
 failed. This workflow does not measure streaming performance and is not an
 instant outage detector.
+
+The separate **Manual private HA boundary check** workflow can probe an
+operator's explicitly configured public WAN IP on ports 443, 8123 and 8444.
+Put a JSON list of those public IPs in the temporary repository secret
+`PRIVATE_HA_AUDIT_TARGETS`, run the workflow manually, inspect its result, then
+delete the secret. Logs omit the target addresses. A passing result only
+establishes that those ports were unreachable from that external runner at
+that time; it is not an audit of every router rule or every WAN port.
 
 ## Deploy elsewhere
 

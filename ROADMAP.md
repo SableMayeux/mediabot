@@ -36,8 +36,11 @@ The 2.x line provides explicit capture-to-task/event promotion, task completion,
 one-shot task reminders and local text conversation. Version 2.6 includes an
 opt-in, source-constrained task decision with `$think --auto` and optional
 provider-candidate reranking with `$recommend --auto`. These commands still
-require their separately commissioned gateways. Retrieval and web search remain
-separate milestones. Local conversation cannot execute Life operations.
+require their separately commissioned gateways. Web-assisted conversation,
+explicit GPU selection, model access controls and a cancellable inference
+queue are available through the later 2.x releases. Document and image
+retrieval remain separate work. Local conversation cannot execute Life
+operations.
 
 ## Make the release usable on another server
 
@@ -62,13 +65,34 @@ tested upgrade/restore paths, and multi-user Life enrollment with isolated
 storage and authorization. Home Assistant and voice-device setup remain
 separate from installing the Discord bot.
 
-## Integration candidates
+## Delivered in 2.11
+
+- `$home` provides an actor-bound personal DM screen with requests, discovery,
+  ratings, reports and download progress. Each action checks current trusted
+  server membership; owner tools remain owner-only.
+- `$tonight` selects playable Jellyfin movies with known runtimes and optional
+  group preferences. It does not invent availability.
+- Torrent review survives a bot restart, tracks approval and shows the actual
+  download path. VPN binding, file selection and scan coverage remain explicit.
+- The current homelab runs Music Assistant with a read-only NAS music library,
+  HA playback controls and a private HTTPS Cast dashboard on Denny's.
+- `$ha home` and the owner home-screen button explicitly stop Denny's music
+  and restore the dashboard through a fixed local-only webhook.
+- HA receives scoped owner notifications. The optional external watchdog
+  checks public media/request health and reports failure/recovery transitions.
+- Deployment verifies SQLite backups by restoring an isolated copy. This
+  does not establish that a complete NAS disaster recovery was tested.
+
+## Remaining integrations
 
 Candidate integrations include:
 
-- Home Assistant intents and household automation;
-- private local AI for conversational routing or richer media understanding;
-- external outage/status services that live outside the homelab failure domain;
+- HA Companion phone enrollment and targeted push/action buttons;
+- local Assist voice input and an explicit microphone/device setup;
+- multi-user Life enrollment with isolated storage and authorization;
+- complete portable packaging for the optional gateways;
+- complete NAS disaster recovery and a physical-device restore drill;
+- further local AI retrieval or richer media understanding;
 - photo/document search and other user-owned libraries.
 
 Explicit note-to-task promotion into the chosen CalDAV task store and

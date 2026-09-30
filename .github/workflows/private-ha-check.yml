@@ -1,0 +1,15 @@
+name: Manual private HA boundary check
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Check explicitly configured WAN targets
+        env:
+          PRIVATE_HA_AUDIT_TARGETS: ${{ secrets.PRIVATE_HA_AUDIT_TARGETS }}
+        run: python3 scripts/check_private_ha.py

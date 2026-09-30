@@ -17,7 +17,7 @@ class QueryModal(discord.ui.Modal):
 
 
 class HomeView(discord.ui.View):
-    def __init__(self, actor_id, authorize, dispatch, *, owner=False, review=False, links=None):
+    def __init__(self, actor_id, authorize, dispatch, *, owner=False, review=False, home_control=False, links=None):
         super().__init__(timeout=600)
         self.actor_id, self.authorize, self.dispatch = actor_id, authorize, dispatch
         actions = [("My requests", "requests", None), ("Find something to watch", "discover", "movie --count 3"),
@@ -28,6 +28,8 @@ class HomeView(discord.ui.View):
             actions.append(("Review downloads", "torrent", "review"))
         if owner:
             actions.append(("My tasks", "life", "tasks"))
+            if home_control:
+                actions.append(("Show HA on Denny's", "ha", "home"))
         for index, (label, command, query) in enumerate(actions):
             button = discord.ui.Button(label=label, style=discord.ButtonStyle.primary if index < 3 else discord.ButtonStyle.secondary)
             async def callback(interaction, command=command, query=query, label=label):

@@ -7,6 +7,25 @@ and this project uses semantic version numbers.
 
 ## [Unreleased]
 
+## [2.11.1] - 2026-09-29
+
+### Fixed
+
+- Owner-only `$ha home` and the personal Home screen's **Show HA on Denny's**
+  button provide a direct return from music to the HA dashboard. The separately
+  provisioned LAN-only webhook performs one fixed action; it does not give
+  MediaBot an HA administrator token or arbitrary device-control access.
+- Home-control delivery distinguishes acceptance from a confirmed screen.
+  Timeouts are not retried automatically, redirects are refused, and webhook
+  capability URLs are redacted from application logs.
+- DM command-specific help applies owner visibility checks.
+
+### Added
+
+- An optional manual GitHub Actions check tests the owner's explicitly supplied
+  WAN targets on HA-related ports from outside the homelab. Target addresses
+  stay in an Actions secret and are omitted from the report.
+
 ## [2.11.0] - 2026-09-29
 
 ### Added

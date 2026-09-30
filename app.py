@@ -82,6 +82,7 @@ from mediabot.services.web_search import WebSearchService
 from mediabot.services.chat_access import allowed_chat_user
 from mediabot.services.media_access import media_scope
 from mediabot.services.home_notifications import notify_home
+from mediabot.services.home_controls import cast_webhook_url, restore_home
 from mediabot.ui.personal_home import HomeView
 from mediabot.services.group_picks import rank_movies
 from mediabot.ui.local_ai import LocalChatView, append_prompt, conversation_embed, parse_ask_options
@@ -164,9 +165,9 @@ PREFIX = "$"
 OWNER_DM_COMMANDS = frozenset({"think", "life"})
 ADMIN_DM_GUILDS = {}
 MEDIA_DM_GUILDS = {}
-MEDIA_DM_COMMANDS = frozenset({"home", "server", "requests", "downloads", "tonight", "request", "discover", "recommend", "rate", "status", "music", "report", "new", "whoami", "torrent", "version", "ping"})
+MEDIA_DM_COMMANDS = frozenset({"home", "ha", "server", "requests", "downloads", "tonight", "request", "discover", "recommend", "rate", "status", "music", "report", "new", "whoami", "torrent", "version", "ping"})
 
-BOT_VERSION = "2.11.0"
+BOT_VERSION = "2.11.1"
 
 # discord.py normally wraps non-successful API responses in HTTPException, but
 # aiohttp connection failures can escape directly before Discord returns a
@@ -313,7 +314,7 @@ _LOG_SECRET_VALUES = tuple(
             if value
             and len(str(value)) >= 8
             and (
-                name.upper().endswith(("_API_KEY", "_TOKEN", "_SECRET"))
+                name.upper().endswith(("_API_KEY", "_TOKEN", "_SECRET", "_WEBHOOK"))
                 or name.upper() in {"DISCORD_TOKEN", "TRAKT_CLIENT_ID"}
             )
         },
@@ -325,6 +326,7 @@ _LOG_SECRET_VALUES = tuple(
 
 def _redact_sensitive_text(value):
     text = str(value)
+    text = re.sub(r"(?i)/api/webhook/[A-Za-z0-9_-]+", "/api/webhook/[REDACTED]", text)
     for secret_value in _LOG_SECRET_VALUES:
         text = text.replace(secret_value, "[REDACTED]")
     text = re.sub(
@@ -9735,6 +9737,7 @@ COMMAND_USAGE = {
     "event cancel": "event cancel <event id>",
     "music": "music <artist and track>",
     "think": "think [--auto] <anything on your mind>",
+    "ha": "ha home",
     "torrent": "torrent <movie|tv|music|game|app|other> <magnet link>",
     "discover": "discover [movie|show] [genres] [--count N] [--top N] [--random]",
     "recommend": "recommend [movie|show] [genres] [--count N] [--top N] [--random | --auto]",
@@ -9860,7 +9863,7 @@ async def mediabot_help(
                             and visible_to_account(command)}
         command = bot.get_command(normalized_topic) if normalized_topic else None
         if normalized_topic and normalized_topic not in {"all", "advanced"}:
-            if command is None or command.qualified_name not in dm_commands:
+            if command is None or command.qualified_name not in dm_commands or not visible_to_account(command):
                 await ctx.reply("That command is available only in the configured server, or is not available to this account. Use `$help` for DM commands.")
                 return
             description = f"`{command_usage(command, prefix)}`\n{command_description(command)}"
@@ -9881,6 +9884,7 @@ async def mediabot_help(
                  f"`{prefix}help <command>` - command details"]
         if is_bot_owner:
             lines += [f"`{prefix}think [--auto] <text>` - save your private raw capture; --auto attempts one source-quoted task",
+                      f"`{prefix}ha home` - stop Denny's music and restore its HA touch screen",
                       f"`{prefix}life inbox` - your captures and confirmed task/event creation",
                       f"`{prefix}life tasks` - your Nextcloud tasks and completion"]
         if is_administrator:
@@ -10029,6 +10033,7 @@ async def mediabot_help(
             utility_lines.append(
                 f"`{prefix}think [--auto] <text>` - save a private raw capture; optionally create one source-quoted task"
             )
+            utility_lines.append(f"`{prefix}ha home` - stop Denny's music and restore its HA touch screen")
         if can_use_torrent:
             utility_lines.append(
                 f"`{prefix}torrent <type> <magnet>` - securely enqueue a magnet"
@@ -10049,6 +10054,7 @@ async def mediabot_help(
         embed.add_field(name="Local conversation", value=f"`{prefix}ask <question>` - answer here with automatic GPU selection\n`{prefix}ask --desktop <question>` - desktop only, no server fallback\n`{prefix}ask --server <question>` - server only\nAdd `--web` for cited sources or `--private` for DM delivery, before the question. GPU selection never grants access. Busy requests queue automatically. Cancel removes a queued request or stops generation; Finish sooner requests a compact server answer. Follow-ups keep your GPU selection and web mode.", inline=False)
         if is_bot_owner:
             embed.add_field(name="Your private Life workspace", value=f"`{prefix}think [--auto] <text>` - save first; optionally classify one task\n`{prefix}life inbox` / `{prefix}life tasks` - captures, tasks and confirmed actions\nThese commands also work in your DM. Life storage is currently owner-only.", inline=False)
+            embed.add_field(name="Home Assistant", value=f"`{prefix}ha home` - stop Denny's music and restore its HA touch screen\nOr open `{prefix}home` and press **Show HA on Denny's**. This fixed device action is owner-only.", inline=False)
         if is_bot_owner or is_administrator:
             embed.add_field(name="Torrent file approval", value=f"`{prefix}torrent review` - choose a job, select files, approve, then check progress and its download path. Games, apps and other manual downloads wait for this approval. Completed manual downloads stay at that path; they are not automatically imported into Jellyfin.", inline=False)
         embed.add_field(
@@ -10091,7 +10097,7 @@ async def mediabot_help(
                 "Add `--random` to either one and `--count 3` for several. "
                 "`$recommend --auto` lets the local model rank up to six real provider candidates; "
                 "facts stay provider-sourced and unavailable AI falls back to standard ranking. "
-                "Media commands currently run in the server."
+                "Linked members can use media commands in DMs after current server membership checks."
             ),
             inline=False,
         )
@@ -10620,10 +10626,28 @@ async def personal_home(ctx):
     embed.set_footer(text="This screen is yours. Run $home again whenever you need it.")
     links = {"Jellyfin": os.environ.get("JELLYFIN_PUBLIC_URL", ""), "Music": os.environ.get("MUSIC_ASSISTANT_PUBLIC_URL", ""), "Home Assistant": os.environ.get("HOME_ASSISTANT_PUBLIC_URL", "") if owner else ""}
     view = HomeView(ctx.author.id, authorize, dispatch, owner=owner,
-        review=owner or scope[1].guild_permissions.administrator, links=links)
+        review=owner or scope[1].guild_permissions.administrator,
+        home_control=bool(cast_webhook_url()), links=links)
     await target.send(embed=embed, view=view)
     if ctx.guild is not None:
         await ctx.reply("Your personal home screen is in your DMs.", delete_after=15)
+
+
+@bot.command(name="ha", help="Owner only: $ha home stops Denny's music and restores its Home Assistant touch screen.")
+@commands.is_owner()
+@commands.cooldown(1, 15, commands.BucketType.user)
+async def home_assistant_control(ctx, action: str = ""):
+    if action.casefold() != "home":
+        await ctx.reply("Use `$ha home` to stop Denny's music and show its HA dashboard.")
+        return
+    outcome = await restore_home()
+    messages = {
+        "accepted": "Sent Denny's return-to-Home request. It stops music and restores the HA screen; Cast may take a few seconds to reconnect.",
+        "unconfigured": "Denny's restore control is not configured. No device action was sent.",
+        "rejected": "HA rejected the restore request. No successful action is confirmed.",
+        "unconfirmed": "The restore request could not be confirmed. It was not retried automatically; check Denny's before trying again.",
+    }
+    await ctx.reply(messages[outcome])
 
 
 @bot.command(name="requests", help="Show your own tracked movie, TV and music requests.")
