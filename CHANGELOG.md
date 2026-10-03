@@ -7,6 +7,29 @@ and this project uses semantic version numbers.
 
 ## [Unreleased]
 
+## [2.12.0] - 2026-10-02
+
+### Added
+
+- `$tonight horror`, multiple genres and sci-fi aliases now filter actual
+  playable movie matches. `--time 90`, `--under 2h` and `--runtime 1h30m`
+  specify the maximum movie length; unknown options/genres do not broaden picks.
+- One result card provides genre/runtime selectors, custom filters, updates
+  and direct watch links. Requester-only controls edit the same card.
+- **Include my ratings** joins the clicker's current group and opts them in.
+  **Keep my ratings private** revokes their sharing and leaves that group.
+  Changes affect only the clicker's account, with private confirmations and
+  fresh membership/consent checks. Groups remain limited to eight people.
+
+### Fixed
+
+- Movie catalog pagination includes matches beyond the first page. No matches
+  remain an explicit empty result with usable filters, rather than substituting
+  unrelated genres. Consent revocation is honored on the next refresh.
+- Expired controls are disabled while watch links remain available; modal
+  submissions recheck access and expiration. Combined movie cards respect
+  Discord's message limits. DM/server help and usage examples cover the controls.
+
 ## [2.11.1] - 2026-09-29
 
 ### Fixed

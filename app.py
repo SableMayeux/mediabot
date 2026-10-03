@@ -84,7 +84,8 @@ from mediabot.services.media_access import media_scope
 from mediabot.services.home_notifications import notify_home
 from mediabot.services.home_controls import cast_webhook_url, restore_home
 from mediabot.ui.personal_home import HomeView
-from mediabot.services.group_picks import rank_movies
+from mediabot.services.group_picks import rank_movies, parse_tonight_options, resolve_tonight_genres, library_genres, load_tonight_catalog
+from mediabot.ui.tonight import TonightView
 from mediabot.ui.local_ai import LocalChatView, append_prompt, conversation_embed, parse_ask_options
 from mediabot.ui.life_auto import promote_automatically
 from mediabot.services.local_ai import LocalAIError
@@ -167,7 +168,7 @@ ADMIN_DM_GUILDS = {}
 MEDIA_DM_GUILDS = {}
 MEDIA_DM_COMMANDS = frozenset({"home", "ha", "server", "requests", "downloads", "tonight", "request", "discover", "recommend", "rate", "status", "music", "report", "new", "whoami", "torrent", "version", "ping"})
 
-BOT_VERSION = "2.11.1"
+BOT_VERSION = "2.12.0"
 
 # discord.py normally wraps non-successful API responses in HTTPException, but
 # aiohttp connection failures can escape directly before Discord returns a
@@ -9738,6 +9739,7 @@ COMMAND_USAGE = {
     "music": "music <artist and track>",
     "think": "think [--auto] <anything on your mind>",
     "ha": "ha home",
+    "tonight": "tonight [genres] [@members] [--time 90]",
     "torrent": "torrent <movie|tv|music|game|app|other> <magnet link>",
     "discover": "discover [movie|show] [genres] [--count N] [--top N] [--random]",
     "recommend": "recommend [movie|show] [genres] [--count N] [--top N] [--random | --auto]",
@@ -9877,7 +9879,7 @@ async def mediabot_help(
         lines = [f"`{prefix}ask [--desktop|--server] [--web] <question>` - chat here in DM; select a GPU and optionally retrieve web sources",
                  f"`{prefix}home` - your personal screen: requests, watch picks, ratings and reports",
                  f"`{prefix}requests` / `{prefix}request <title>` / `{prefix}status <title or #ID>` - your media requests",
-                 f"`{prefix}discover` / `{prefix}recommend` / `{prefix}tonight [@members] [--under 120]` - watch picks",
+                 f"`{prefix}discover` / `{prefix}recommend` / `{prefix}tonight [genres] [@members] [--time 90]` - watch picks",
                  f"`{prefix}rate` / `{prefix}report <title>` / `{prefix}music <track>` / `{prefix}whoami` - ratings, reports, music and identity",
                  f"`{prefix}torrent <type> <magnet>` - private intake; owner/admin approval remains required",
                  f"`{prefix}server <server ID>` - select your server when you belong to several",
@@ -10021,7 +10023,7 @@ async def mediabot_help(
         utility_lines = [
             f"`{prefix}home` - your private media home screen",
             f"`{prefix}requests` / `{prefix}downloads` - your requests and magnet progress",
-            f"`{prefix}tonight [@members] [--under 120]` - playable group movie picks",
+            f"`{prefix}tonight [genres] [@members] [--time 90]` - playable group movie picks",
             f"`{prefix}new` - recently added media",
             f"`{prefix}whoami` - linked request identity",
             f"`{prefix}ping` - connection latency",
@@ -10050,7 +10052,7 @@ async def mediabot_help(
         return
 
     if normalized_topic != "all":
-        embed.add_field(name="Your personal media home", value=f"`{prefix}home` - private buttons for requests, watch picks, ratings and reports\n`{prefix}requests` / `{prefix}downloads` - your tracked progress\n`{prefix}tonight [@members] [--under 120]` - three playable movie picks\nMedia commands work in DMs after account linking and current server membership checks.", inline=False)
+        embed.add_field(name="Your personal media home", value=f"`{prefix}home` - private buttons for requests, watch picks, ratings and reports\n`{prefix}requests` / `{prefix}downloads` - your tracked progress\n`{prefix}tonight [genres] [@members] [--time 90]` - three playable movie picks\nMedia commands work in DMs after account linking and current server membership checks.", inline=False)
         embed.add_field(name="Local conversation", value=f"`{prefix}ask <question>` - answer here with automatic GPU selection\n`{prefix}ask --desktop <question>` - desktop only, no server fallback\n`{prefix}ask --server <question>` - server only\nAdd `--web` for cited sources or `--private` for DM delivery, before the question. GPU selection never grants access. Busy requests queue automatically. Cancel removes a queued request or stops generation; Finish sooner requests a compact server answer. Follow-ups keep your GPU selection and web mode.", inline=False)
         if is_bot_owner:
             embed.add_field(name="Your private Life workspace", value=f"`{prefix}think [--auto] <text>` - save first; optionally classify one task\n`{prefix}life inbox` / `{prefix}life tasks` - captures, tasks and confirmed actions\nThese commands also work in your DM. Life storage is currently owner-only.", inline=False)
@@ -10685,47 +10687,108 @@ async def my_downloads(ctx):
         await ctx.reply(embed=embed)
 
 
-@bot.command(name="tonight", help="Pick three playable movies: $tonight [@members] [--under 120]. Use $tonight optin/optout to control group use of your ratings.")
-@commands.cooldown(2, 30, commands.BucketType.user)
-async def tonight(ctx, *, options: str = ""):
-    consent_action = options.strip().casefold() in {"optin", "optout"}
+def tonight_profiles(identities, requester_id):
     with db() as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS group_taste_consent (discord_user_id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL)")
-        if consent_action:
-            enabled = int(options.strip().casefold() == "optin")
-            conn.execute("INSERT INTO group_taste_consent VALUES (?,?) ON CONFLICT(discord_user_id) DO UPDATE SET enabled=excluded.enabled", (ctx.author.id, enabled))
-        opted_in = {row[0] for row in conn.execute("SELECT discord_user_id FROM group_taste_consent WHERE enabled=1")}
-    if consent_action:
-        await ctx.reply("Your ratings can inform group picks." if enabled else "Your ratings will only inform your own picks.")
-        return
-    limit_match = re.search(r"--under\s+(\d+)\b", options)
-    limit = int(limit_match.group(1)) if limit_match else 150
-    residual = re.sub(r"<@!?\d+>|--under\s+\d+", "", options).strip()
-    if residual or not 30 <= limit <= 300:
-        await ctx.reply("Use `$tonight [@members] [--under 120]`. Runtime must be 30 to 300 minutes.")
-        return
+        placeholders = ','.join('?' for _ in identities)
+        opted_in = {row[0] for row in conn.execute(f"SELECT discord_user_id FROM group_taste_consent WHERE enabled=1 AND discord_user_id IN ({placeholders})", tuple(identities))}
+    return [ratings_for_user(identity) for identity in sorted(identities) if identity == requester_id or identity in opted_in]
+
+
+async def set_tonight_consent(identity, enabled):
+    with db() as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS group_taste_consent (discord_user_id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL)")
+        conn.execute("INSERT INTO group_taste_consent VALUES (?,?) ON CONFLICT(discord_user_id) DO UPDATE SET enabled=excluded.enabled", (identity, int(enabled)))
+
+
+def tonight_payload(items, profiles, *, genres, max_minutes, participant_count=1):
+    picks = rank_movies(items, profiles, max_minutes=max_minutes, genres=genres)
+    selected = discord.utils.escape_mentions(discord.utils.escape_markdown(', '.join(str(name)[:80] for name in genres))) if genres else 'Any genre'
+    content = (f"**Tonight: {selected} | up to {max_minutes} minutes**\n"
+               f"{len(picks)} watch-now {'pick' if len(picks) == 1 else 'picks'} from Jellyfin. "
+               f"Genres match any selected option. Group: {participant_count}/8 people.\n"
+               "Change genre/runtime below. Each person can use **Include my ratings** or **Keep my ratings private**; "
+               "joining or leaving updates this card. Controls expire after 10 minutes idle.")
+    if not picks:
+        content += '\nNo playable movies with a known runtime match these filters. Try another genre or more time.'
+    embeds = []
+    for item in picks:
+        shape, details = available_media_shape(item)
+        embed = build_media_embed(shape, details, heading='Tonight', state_text='Available in Jellyfin', color=discord.Color.green())
+        embed.url = jellyfin.watch_url(item['Id'])
+        # Keep the combined three-card message within Discord's 6,000-character
+        # ceiling even when provider genre/creator metadata is unusually long.
+        if len(embed) > 1900:
+            embed.description = short_overview(details, limit=450)
+            for index, field in enumerate(embed.fields):
+                embed.set_field_at(index, name=field.name, value=compact_embed_field(field.value, limit=140), inline=field.inline)
+        embeds.append(embed)
+    return {'content': content, 'embeds': embeds}, picks
+
+
+@bot.command(name="tonight", help="Pick up to three playable movies: $tonight [genres] [@members] [--time 90]. --under is also supported; times are maximum movie runtimes. Genre/runtime menus and rating opt-in/out buttons are on the card. $tonight optin/optout still work.")
+@commands.cooldown(2, 30, commands.BucketType.user)
+async def tonight(ctx, *, options: str = ""):
     scope = await media_scope(bot, ctx.author, ALLOWED_GUILD_IDS, MEDIA_DM_GUILDS, guild_id=getattr(ctx.guild, "id", None))
-    identities = {ctx.author.id} | {int(value) for value in re.findall(r"<@!?(\d+)>", options)}
+    consent_action = options.strip().casefold() in {"optin", "optout"}
+    if consent_action:
+        enabled = options.strip().casefold() == "optin"
+        await set_tonight_consent(ctx.author.id, enabled)
+        await ctx.reply("Your ratings can inform group picks when someone includes you." if enabled else "Your ratings will only inform your own picks.")
+        return
+    try:
+        settings = parse_tonight_options(options)
+    except ValueError as error:
+        await ctx.reply(f"{error}\nTry `$tonight horror --time 90` or `$tonight science fiction @friend --under 2h`.")
+        return
+    identities = {ctx.author.id, *settings.participant_ids}
     if len(identities) > 8:
         await ctx.reply("Choose up to eight participants.")
         return
-    for identity in identities:
-        await scope[0].fetch_member(identity)
-    profiles = [ratings_for_user(identity) for identity in sorted(identities) if identity == ctx.author.id or identity in opted_in]
     if not jellyfin.enabled:
         await ctx.reply("Jellyfin is not configured.")
         return
+    async def authorize(user):
+        await media_scope(bot, user, ALLOWED_GUILD_IDS, {}, guild_id=scope[0].id)
+        if ctx.guild is None and not await bot.is_owner(user) and not get_link(user.id):
+            raise commands.CheckFailure('Your Discord account needs a Seerr link. Ask an administrator to link it.')
+    async def validate_participants():
+        for identity in sorted(identities):
+            try:
+                member = await scope[0].fetch_member(identity)
+            except discord.NotFound:
+                raise commands.CheckFailure('All movie-night participants must still belong to this server.') from None
+            except discord.HTTPException:
+                raise commands.CheckFailure('I could not verify the movie-night participants. Try again shortly.') from None
+            if member.bot:
+                raise commands.CheckFailure('Choose people, not bot accounts, for movie-night participants.')
     async with ctx.typing():
-        catalog = await jellyfin.catalog(item_type="Movie", start_index=0, limit=5000, sort_by="CommunityRating", sort_order="Descending")
-        picks = rank_movies(catalog.get("Items", []), profiles, max_minutes=limit)
-    await ctx.reply(f"Three watch-now picks under {limit} minutes. Other participants' ratings are used only after `$tonight optin`. These are library matches, with no AI inference.")
-    if not picks:
-        await ctx.reply("No playable movies with a known runtime fit that limit.")
-    for item in picks:
-        shape, details = available_media_shape(item)
-        view = discord.ui.View(timeout=None)
-        view.add_item(discord.ui.Button(label="Watch in Jellyfin", url=jellyfin.watch_url(item['Id'])))
-        await ctx.reply(embed=build_media_embed(shape, details, heading="Tonight", state_text="Available in Jellyfin", color=discord.Color.green()), view=view)
+        await validate_participants()
+        try:
+            items = await load_tonight_catalog(jellyfin)
+            available = library_genres(items)
+            genres = resolve_tonight_genres(settings.genre_query, available)
+        except ValueError as error:
+            await ctx.reply(str(error))
+            return
+        async def render(wanted, minutes):
+            await validate_participants()
+            profiles = tonight_profiles(identities, ctx.author.id)
+            return tonight_payload(items, profiles, genres=wanted, max_minutes=minutes, participant_count=len(identities))
+        payload, picks = await render(genres, settings.max_minutes)
+    async def consent_for_card(identity, enabled):
+        if enabled and identity not in identities and len(identities) >= 8:
+            raise commands.CheckFailure('This group already has eight people. Open your own `$tonight` card.')
+        await set_tonight_consent(identity, enabled)
+        if enabled:
+            identities.add(identity)
+        elif identity != ctx.author.id:
+            identities.discard(identity)
+    view = TonightView(actor_id=ctx.author.id, guild_id=getattr(ctx.guild, 'id', None),
+                       available_genres=available, genres=genres, max_minutes=settings.max_minutes,
+                       authorize=authorize, render=render, set_consent=consent_for_card, watch_url=jellyfin.watch_url)
+    view.rebuild(picks)
+    view.message = await ctx.reply(**payload, view=view)
 
 
 @bot.command()

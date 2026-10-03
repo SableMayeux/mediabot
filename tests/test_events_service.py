@@ -262,8 +262,9 @@ class EventServiceTests(unittest.TestCase):
 
     def test_candidate_times_fit_one_discord_select(self):
         event = self.create_event()
+        first = (datetime.now(DENVER) + timedelta(days=30)).replace(hour=19, minute=0, second=0, microsecond=0)
         options = tuple(
-            datetime(2026, 10, 1, 19, tzinfo=DENVER) + timedelta(days=index)
+            first + timedelta(days=index)
             for index in range(25)
         )
         self.assertEqual(
@@ -273,13 +274,13 @@ class EventServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(EventUsageError, "at most 25"):
             self.service.add_time_options(
                 event.event_id,
-                (datetime(2026, 11, 1, 19, tzinfo=DENVER),),
+                (first + timedelta(days=31),),
                 3,
             )
         with self.assertRaisesRegex(EventUsageError, "at most 25"):
             self.service.replace_time_options(
                 event.event_id,
-                options + (datetime(2026, 11, 1, 19, tzinfo=DENVER),),
+                options + (first + timedelta(days=31),),
                 3,
             )
 

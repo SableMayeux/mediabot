@@ -34,6 +34,8 @@ The default prefix is `$`.
 | `$event complete\|cancel\|archive <id>` | Administrator: close or soft-hide one event. |
 | `$event clear` | Administrator: complete expired schedules and archive terminal events. |
 | `$new [count]` | Show recently added Jellyfin media. |
+| `$tonight [genres] [@members] [--time 90]` | Choose up to three playable movies by genre and maximum runtime; change filters or join through the result card. `--under 2h` also works. |
+| `$tonight optin\|optout` | Control use of your own ratings in group movie picks; the card's personal sharing buttons also support this. |
 | `$help [command]` | Show the current user-facing command model and generated details. |
 | `$admin` | Open administrator tools in the server or DM, subject to the same current server permissions. |
 | `$admin server [server ID]` | List currently eligible servers, or select the server used by DM administration. |

@@ -4,7 +4,7 @@
 MediaBot connects your server to your existing media stack, with search cards,
 confirmation buttons, account-linked requests and progress receipts.
 
-Current source version: **2.11.1**. Get stable source releases and change notes from
+Current source version: **2.12.0**. Get stable source releases and change notes from
 [Releases](https://github.com/SableMayeux/mediabot/releases).
 
 ```text
@@ -15,7 +15,7 @@ $status #123                    Check a tracked request
 $event                          Vote on the next media night
 $help                           See what your account can use
 $home                           Open your private media home screen
-$tonight --under 120             Pick three watch-now library movies
+$tonight horror --time 90        Pick horror movies; adjust filters/join on the card
 ```
 
 ## Run it on your server

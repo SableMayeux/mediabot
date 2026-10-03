@@ -65,13 +65,14 @@ tested upgrade/restore paths, and multi-user Life enrollment with isolated
 storage and authorization. Home Assistant and voice-device setup remain
 separate from installing the Discord bot.
 
-## Delivered in 2.11
+## Delivered in 2.11 and 2.12
 
 - `$home` provides an actor-bound personal DM screen with requests, discovery,
   ratings, reports and download progress. Each action checks current trusted
   server membership; owner tools remain owner-only.
 - `$tonight` selects playable Jellyfin movies with known runtimes and optional
-  group preferences. It does not invent availability.
+  group preferences. Genre/runtime filters and self-service group consent
+  controls update the same card. It does not invent availability.
 - Torrent review survives a bot restart, tracks approval and shows the actual
   download path. VPN binding, file selection and scan coverage remain explicit.
 - The current homelab runs Music Assistant with a read-only NAS music library,

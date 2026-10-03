@@ -113,11 +113,28 @@ If you belong to several configured servers, use `$server <server ID>` first.
 Membership is fetched again for each command and button. A server selection
 does not grant permissions and lasts until the bot restarts.
 
-`$tonight @friend --under 120` picks up to three movies already playable in the
-library, under the stated runtime. Your own ratings inform your picks. A friend
-must run `$tonight optin` before their ratings can inform a group choice, and can
-revoke it with `$tonight optout`. The result never exposes individual ratings or
-uses AI inference. Up to eight current server members can participate.
+Try `$tonight horror --time 90`, or `$tonight science fiction @friend --under 2h`.
+This picks up to three playable Jellyfin movies matching the genre and maximum
+runtime. `--time`, `--under` and `--runtime` accept minutes, `2h`, `1h30m` or
+`1:30`, between 30 and 300 minutes. These are movie lengths; use `$event time`
+for scheduled start times. The default is any genre, up to 150 minutes.
+
+Select genres and runtime on the result card, or press **Custom filters** to
+type both. Several genres, such as `$tonight horror,thriller`, match any one of
+them. Sci-fi and multiword genre names work. Unknown genres and no-match results
+never silently broaden into unrelated suggestions. The requester controls
+filters; changes update the same card, with direct watch links for each pick.
+
+Anyone in that configured server can press **Include my ratings** to join the
+current group and opt in to group rating sharing. **Keep my ratings private**
+revokes sharing and leaves the current group, except for the requester. Each
+person can only change their own preference. Your own ratings still inform your
+own picks. Joining/leaving refreshes the card; every refresh rereads consent.
+The buttons confirm the choice privately and never post individual ratings.
+The existing `$tonight optin` and `$tonight optout` commands remain available.
+Up to eight current members can participate. Controls expire after ten minutes
+idle; watch links remain usable. Run `$tonight` again after expiration or a
+restart. This deterministic library ranking does not call the LLM.
 
 | Command group | Server channel | Direct message to the bot |
 | --- | --- | --- |
